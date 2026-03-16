@@ -20,7 +20,7 @@ cd mcp_v2_server
 
 venv\Scripts\activate
 
-uvicorn main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8000
 
 
 4. START MCP V3 SERVER
