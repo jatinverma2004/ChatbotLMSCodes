@@ -1,0 +1,38 @@
+{
+  "U102": [
+    {
+      "title": "Hi Manish \ud83d\udc4b",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "Hi Manish \ud83d\udc4b"
+        },
+        {
+          "role": "user",
+          "content": "leave policy?"
+        },
+        {
+          "role": "assistant",
+          "content": "\ud83d\udcc4 Using 6 SOP document(s)\n\nThe Leave Policy in the provided document establishes that employees are entitled to various types of leave, which include annual leave, sick leave, and emergency leave. These leave requests should be processed through the company's approved system, and managerial approval is required for the approval of leave requests. Employees are encouraged to plan their leaves in advance whenever possible to reduce the impact on team operations. The goal is to minimize disruption to the workplace while allowing employees to take the necessary time off."
+        }
+      ]
+    },
+    {
+      "title": "leave policy]",
+      "messages": [
+        {
+          "role": "assistant",
+          "content": "Hi Manish \ud83d\udc4b"
+        },
+        {
+          "role": "user",
+          "content": "leave policy]"
+        },
+        {
+          "role": "assistant",
+          "content": "\ud83d\udcc4 Using 6 SOP document(s)\n\nLeave policy:\n\nEmployees are entitled to various types of leave, including annual leave, sick leave, and emergency leave, based on company guidelines. Leave requests must be submitted through the approved system and require managerial approval. Employees are encouraged to plan leaves in advance to minimize disruption to team operations."
+        }
+      ]
+    }
+  ]
+}
