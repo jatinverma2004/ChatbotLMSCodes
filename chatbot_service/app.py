@@ -4,16 +4,104 @@ from pypdf import PdfReader
 from docx import Document
 import requests
 import json
+import threading
+import sqlite3
+from datetime import datetime
+
+from chat_evaluator import evaluate_answer
+from evaluation_db import insert_record, init_db
+
+# ✅ NEW IMPORT
+from groq import Groq
+
+# ================= DATABASE SETUP =================
+
+DB_PATH = "evaluation.db"
+
+def ensure_dashboard_table():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS evaluations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        question TEXT,
+        answer TEXT,
+        accuracy REAL,
+        precision REAL,
+        recall REAL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+init_db()
+ensure_dashboard_table()
 
 app = FastAPI(title="Employee Skill Chatbot")
 
 # ================= CONFIG =================
 
 MCP_BASE_URL = "http://127.0.0.1:8100"
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "phi3"
 
+# ❌ OLD (kept but unused for safety)
+OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+OLLAMA_MODEL = "phi3:latest"
+
+# ✅ NEW GROQ CLIENT
+import os
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+print("KEY:", os.getenv("GROQ_API_KEY"))
 SOP_CACHE = {}
+
+# ================= SOP SANITIZER =================
+
+def clean_sop_text(text: str) -> str:
+    if not text:
+        return ""
+
+    blocked_patterns = [
+        "your task",
+        "instruction:",
+        "###",
+        "```",
+        "generate",
+        "appendix",
+        "solution:",
+        "problem:",
+        "query:"
+    ]
+
+    lower = text.lower()
+
+    for p in blocked_patterns:
+        if p in lower:
+            text = text.replace(p, "")
+
+    return text.strip()
+
+# ================= OUTPUT GUARD =================
+
+def guard_llm_output(text: str) -> str:
+    if not text:
+        return text
+
+    lower = text.lower()
+
+    dangerous_patterns = [
+        "your task:",
+        "generate two more constraints",
+        "write an in-depth analysis"
+    ]
+
+    for p in dangerous_patterns:
+        if p in lower:
+            return "⚠️ Unsafe content detected. Please rephrase your question."
+
+    return text
 
 # ================= USER CONTEXT =================
 
@@ -24,42 +112,9 @@ def fetch_user_context(uid: str):
     except:
         return {}
 
-# ================= SKILL CAPABILITY =================
-
-def fetch_skill_capability(context):
-    try:
-        role_code = context.get("user_profile",{}).get("job_role_code","")
-        r = requests.get(f"{MCP_BASE_URL}/api/role-skill-map/{role_code}")
-        data = r.json()
-
-        if not data.get("skills"):
-            return []
-
-        return [s["skill_id"] for s in data["skills"]]
-    except:
-        return []
-
-# ================= INTENT DETECTION =================
-
-def detect_intent_mode(message: str):
-
-    msg = message.lower()
-
-    if any(x in msg for x in ["policy","rule","guideline","leave policy","code of conduct","working hours"]):
-        return "policy"
-
-    if any(x in msg for x in ["core rules","business policy","how to","steps","process","procedure","workflow","do i"]):
-        return "procedure"
-
-    if any(x in msg for x in ["strategy","plan","vision","future","improve","lead"]):
-        return "strategy"
-
-    return "generic"
-
-# ================= 🐝 SMART HIVE ROUTER (PHASE 2) =================
+# ================= HIVE ROUTER =================
 
 def hive_router(message, context):
-
     role_code = context.get("user_profile",{}).get("job_role_code","").upper()
 
     try:
@@ -77,23 +132,13 @@ def hive_router(message, context):
             if str(s.get("job_role_code","")).upper() == role_code:
                 matched.append(s)
 
-        # 🔥 ENTERPRISE LOGIC
         if matched:
-            return {
-                "mode":"SOP",
-                "docs":matched
-            }
+            return {"mode":"SOP","docs":matched}
         else:
-            return {
-                "mode":"GENERAL",
-                "docs":[]
-            }
+            return {"mode":"GENERAL","docs":[]}
 
     except:
-        return {
-            "mode":"GENERAL",
-            "docs":[]
-        }
+        return {"mode":"GENERAL","docs":[]}
 
 # ================= SOP TEXT LOADER =================
 
@@ -108,49 +153,46 @@ def fetch_sop_text(sop_name: str):
 
         content_type = r.headers.get("content-type","")
 
-        if "application/pdf" in content_type:
+        if "pdf" in content_type:
             reader = PdfReader(BytesIO(r.content))
             text = ""
             for page in reader.pages:
                 t = page.extract_text()
                 if t:
                     text += t + "\n"
-            SOP_CACHE[sop_name] = text.strip()
-            return SOP_CACHE[sop_name]
+            SOP_CACHE[sop_name] = text
+            return text
 
-        if "application/vnd.openxmlformats-officedocument.wordprocessingml.document" in content_type:
+        if "wordprocessingml" in content_type:
             doc = Document(BytesIO(r.content))
             text = "\n".join([p.text for p in doc.paragraphs if p.text])
-            SOP_CACHE[sop_name] = text.strip()
-            return SOP_CACHE[sop_name]
+            SOP_CACHE[sop_name] = text
+            return text
 
-        SOP_CACHE[sop_name] = r.text
-        return SOP_CACHE[sop_name]
+        return r.text
 
     except:
         return ""
 
-# ================= SMART PROMPT BUILDER =================
-
+# ================= PROMPT =================
 def build_prompt(context, sop_text, user_message, mode):
 
     user = context.get("user_profile", {})
     role = user.get("job_role_text", "Employee")
 
-    # 🔥 SOP MODE
     if mode == "SOP":
         return f"""
-You are an Enterprise LMS Assistant supporting the currently logged-in employee.
+You are an intelligent Employee Assistant helping employees understand company SOPs.
 
-COMMUNICATION STYLE:
-- Speak directly using "you".
-- Professional enterprise tone.
-- Answer ONLY from provided SOP context.
-- Provide a follow up question to the user based on query.
--Responses should be in paragraphs
--never ask user opinion on provided sop , just assist them and provide what is asked
+Instructions:
+- Answer clearly and in detail (not just one line)
+- Explain concepts in simple language
+- If acronym is asked → expand + explain
+- Use SOP context strictly (do NOT hallucinate)
+- Add examples where useful
+- If answer not found → say "Not found in SOP"
 
-EMPLOYEE ROLE:
+ROLE:
 {role}
 
 SOP CONTEXT:
@@ -158,49 +200,68 @@ SOP CONTEXT:
 
 USER QUESTION:
 {user_message}
+
+FINAL ANSWER:
 """
 
-    # 🔥 GENERAL MODE (NEW INTELLIGENCE)
     return f"""
-You are an Enterprise AI Assistant.
+You are a helpful enterprise assistant.
 
-No SOP matched for this question.
-Provide a professional, practical advisory response.
+Answer clearly and explain properly.
 
-COMMUNICATION STYLE:
-- Speak directly using "you".
-- Do NOT refuse.
-- Give structured guidance.
-
-EMPLOYEE ROLE:
+ROLE:
 {role}
 
-USER QUESTION:
+QUESTION:
 {user_message}
+
+ANSWER:
 """
 
-# ================= OLLAMA =================
+# ================= LLM CALL (REPLACED WITH GROQ) =================
 
 def call_ollama(prompt):
 
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": True
-    }
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
 
-    r = requests.post(OLLAMA_URL, json=payload, stream=True)
+        return response.choices[0].message.content.strip()
 
-    full = ""
+    except Exception as e:
+        print("GROQ ERROR:", e)
+        return f"🔥 ERROR: {str(e)}"
 
-    for line in r.iter_lines():
-        if line:
-            data = json.loads(line.decode())
-            full += data.get("response","")
+# ================= EVALUATION =================
 
-    return full.strip()
+def run_evaluation(uid, message, sop_text, answer):
+    try:
+        ev = evaluate_answer(
+            question=message,
+            context=sop_text,
+            answer=answer
+        )
 
-# ================= ROUTES =================
+        insert_record({
+            "uid": uid,
+            "question": message,
+            "retrieved_context": sop_text[:2000],
+            "answer": answer,
+            "accuracy": ev.get("accuracy",0),
+            "precision": ev.get("precision",0),
+            "recall": ev.get("recall",0)
+        })
+
+    except Exception as e:
+        print("Evaluation failed:", e)
+
+# ================= ROUTE =================
 
 @app.post("/chat")
 def chat(uid: str = Query(...), message: str = Query(...)):
@@ -208,15 +269,15 @@ def chat(uid: str = Query(...), message: str = Query(...)):
     context = fetch_user_context(uid)
 
     route = hive_router(message, context)
-
     mode = route["mode"]
     docs = route["docs"]
 
     collected = []
 
-    # 🔥 MULTI DOC SUPPORT
     for d in docs:
-        collected.append(fetch_sop_text(d["doc_name"]))
+        raw = fetch_sop_text(d["doc_name"])
+        clean = clean_sop_text(raw)
+        collected.append(clean)
 
     sop_text = "\n\n".join(collected)
 
@@ -224,14 +285,20 @@ def chat(uid: str = Query(...), message: str = Query(...)):
 
     answer = call_ollama(prompt)
 
+    answer = guard_llm_output(answer)
+
     header = ""
-
     if mode == "SOP" and docs:
-        header += f"📄 Using {len(docs)} SOP document(s)\n\n"
-    else:
-        header += "🧠 General Advisory Mode\n\n"
+        header = f"📄 Using {len(docs)} SOP document(s)\n\n"
 
-    return {"response": header + answer}
+    final = header + answer
 
+    print("FINAL:", final[:300])
 
+    threading.Thread(
+        target=run_evaluation,
+        args=(uid, message, sop_text, final)
+    ).start()
+
+    return {"answer": final}
     
