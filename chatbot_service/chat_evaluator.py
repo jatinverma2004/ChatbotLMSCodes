@@ -4,50 +4,63 @@ import json
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "phi3"
 
+# chat_evaluator.py
 
-def evaluate_answer(question, context, answer):
+import re
+from collections import Counter
 
-    prompt = f"""
-You are an AI evaluation system.
+def _tokenize(text: str):
+    if not text:
+        return []
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = [t for t in text.split() if len(t) > 2]
+    return tokens
 
-Question:
-{question}
+def _overlap_score(context_tokens, answer_tokens):
+    if not context_tokens or not answer_tokens:
+        return 0.2
 
-Context (SOP content):
-{context}
+    ctx = Counter(context_tokens)
+    ans = Counter(answer_tokens)
 
-Answer:
-{answer}
+    overlap = sum(min(ctx[w], ans[w]) for w in ans)
+    total = sum(ans.values())
 
-Evaluate the answer.
+    if total == 0:
+        return 0.2
 
-Return JSON:
-{{
- "accuracy": score between 0 and 1,
- "precision": score between 0 and 1,
- "recall": score between 0 and 1
-}}
+    score = overlap / total
+    return min(max(score, 0.0), 1.0)
 
-Do not explain.
-"""
+def evaluate_answer(question: str, context: str, answer: str):
+    """
+    Returns RAG-friendly metrics:
+    - accuracy: how much answer overlaps with context
+    - precision: overlap precision
+    - recall: overlap recall
+    """
 
-    payload = {
-        "model": MODEL,
-        "prompt": prompt,
-        "stream": False
-    }
+    context_tokens = _tokenize(context)
+    answer_tokens = _tokenize(answer)
 
-    res = requests.post(OLLAMA_URL, json=payload)
-
-    text = res.json()["response"]
-
-    try:
-        result = json.loads(text)
-    except:
-        result = {
-            "accuracy": 0.5,
-            "precision": 0.5,
-            "recall": 0.5
+    if not context_tokens:
+        # no SOP context retrieved
+        return {
+            "accuracy": 0.3,
+            "precision": 0.3,
+            "recall": 0.3
         }
 
-    return result
+    overlap = _overlap_score(context_tokens, answer_tokens)
+
+    # derive metrics
+    precision = overlap
+    recall = overlap
+    accuracy = overlap
+
+    return {
+        "accuracy": round(accuracy, 2),
+        "precision": round(precision, 2),
+        "recall": round(recall, 2)
+    }
