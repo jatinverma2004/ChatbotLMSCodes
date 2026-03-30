@@ -9,6 +9,8 @@ python -m venv venv
 
 venv\Scripts\activate
 
+uvicorn main:app --reload --port 8100
+
 2. INSTALL REQUIRED DEPENDENCIES
 
 pip install fastapi uvicorn streamlit requests pypdf python-docx sentence-transformers langgraph
