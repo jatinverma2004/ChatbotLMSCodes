@@ -52,9 +52,12 @@ OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 OLLAMA_MODEL = "phi3:latest"
 
 # ✅ NEW GROQ CLIENT
-import os
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-print("KEY:", os.getenv("GROQ_API_KEY"))
+# 🔥 DIRECT API KEY (NO ENV NEEDED)
+GROQ_API_KEY = "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"
+
+client = Groq(api_key=GROQ_API_KEY)
+
+print("✅ GROQ CLIENT INITIALIZED")
 SOP_CACHE = {}
 
 # ================= SOP SANITIZER =================
@@ -229,7 +232,7 @@ def call_ollama(prompt):
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=2000
         )
 
         return response.choices[0].message.content.strip()
@@ -260,7 +263,35 @@ def run_evaluation(uid, message, sop_text, answer):
 
     except Exception as e:
         print("Evaluation failed:", e)
+def generate_prompt_suggestions(role, docs, user_query=None):
+    suggestions = []
 
+    # 🔹 Role-based base prompts
+    suggestions.extend([
+        f"What are key responsibilities of a {role}?",
+        f"What SOPs should a {role} follow daily?",
+        f"What are safety guidelines for {role}?"
+    ])
+
+    # 🔹 SOP-based prompts
+    for d in docs[:3]:
+        name = d.get("doc_name", "").replace(".pdf","")
+        suggestions.append(f"Explain {name}")
+        suggestions.append(f"Key rules from {name}")
+
+    # 🔹 Query-based refinement
+    if user_query:
+        q = user_query.lower()
+
+        if "leave" in q:
+            suggestions.append("What is leave approval process?")
+        if "safety" in q:
+            suggestions.append("List all safety precautions")
+        if "policy" in q:
+            suggestions.append("Summarize company policies")
+
+    # remove duplicates + limit
+    return list(dict.fromkeys(suggestions))[:5]
 # ================= ROUTE =================
 
 @app.post("/chat")
@@ -273,7 +304,7 @@ def chat(uid: str = Query(...), message: str = Query(...)):
     docs = route["docs"]
 
     collected = []
-
+#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
     for d in docs:
         raw = fetch_sop_text(d["doc_name"])
         clean = clean_sop_text(raw)
@@ -290,8 +321,12 @@ def chat(uid: str = Query(...), message: str = Query(...)):
     header = ""
     if mode == "SOP" and docs:
         header = f"📄 Using {len(docs)} SOP document(s)\n\n"
-
-    final = header + answer
+        role = context.get("user_profile", {}).get("job_role_text", "Employee")
+        suggestions = generate_prompt_suggestions(role, docs, message)
+        suggestion_text = "\n\n💡 You can also ask:\n"
+        for s in suggestions:
+            suggestion_text += f"- {s}\n"
+        final = header + answer + suggestion_text
 
     print("FINAL:", final[:300])
 
