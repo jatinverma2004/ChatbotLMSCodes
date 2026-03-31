@@ -62,6 +62,13 @@ if "context_cache" not in st.session_state:
 if "sops_cache" not in st.session_state:
     st.session_state.sops_cache = None
 
+# 🔥 NEW (for suggestion clicks)
+if "auto_send" not in st.session_state:
+    st.session_state.auto_send = False
+
+if "user_input" not in st.session_state:
+    st.session_state.user_input = ""
+
 # ================= LOGIN =================
 
 if not st.session_state.authenticated:
@@ -140,6 +147,7 @@ for sop in role_docs:
             "Open Document",
             f"{MCP_BASE_URL}/api/sop/open/{name}"
         )
+
 st.sidebar.title("⚙️ Controls")
 mode = st.sidebar.toggle("Admin Mode", key="admin_toggle")
 
@@ -147,12 +155,14 @@ if mode:
     import admin_dashboard
     admin_dashboard.render_dashboard()
     st.stop()
+
 if st.sidebar.button("🗑️ Clear Chat History"):
     if uid in memory:
         memory[uid] = []
         save_memory(memory)
         st.session_state.messages = []
         st.rerun()
+
 # ================= HEADER =================
 
 profile = ctx["user_profile"]
@@ -164,6 +174,26 @@ f"<div class='subtitle'>Hi {profile['employee_name']} — Where should we start?
 unsafe_allow_html=True
 )
 
+# ================= HELPER (NEW) =================
+
+def extract_suggestions(answer_text):
+    suggestions = []
+    main_answer = answer_text
+
+    if "💡 You can also ask:" in answer_text:
+        parts = answer_text.split("💡 You can also ask:")
+        main_answer = parts[0]
+
+        suggestion_block = parts[1]
+        lines = suggestion_block.strip().split("\n")
+
+        for l in lines:
+            l = l.replace("- ", "").strip()
+            if l:
+                suggestions.append(l)
+
+    return main_answer, suggestions
+
 # ================= CHAT =================
 
 for msg in st.session_state.messages:
@@ -171,18 +201,31 @@ for msg in st.session_state.messages:
     if msg["role"] == "user":
         st.markdown(f"<div class='user-msg'>{msg['content']}</div>", unsafe_allow_html=True)
     else:
-        st.markdown(f"<div class='bot-msg'>{msg['content']}</div>", unsafe_allow_html=True)
+        main, sugg = extract_suggestions(msg["content"])
+        st.markdown(f"<div class='bot-msg'>{main}</div>", unsafe_allow_html=True)
+
+        # 🔥 SHOW CLICKABLE SUGGESTIONS
+        if sugg:
+            cols = st.columns(2)
+            for i, s in enumerate(sugg):
+                with cols[i % 2]:
+                    if st.button(s, key=f"suggest_{i}_{msg['content'][:10]}"):
+                        st.session_state.user_input = s
+                        st.session_state.auto_send = True
 
 # ================= INPUT =================
 
-# ✅ SAFE IMPORTS (FIXED ISSUE)
 from streamlit_mic_recorder import mic_recorder
 from streamlit_js_eval import streamlit_js_eval
 
 col1, col2 = st.columns([8,1])
 
 with col1:
-    prompt = st.chat_input("Ask something...")
+    if st.session_state.auto_send:
+        prompt = st.session_state.user_input
+        st.session_state.auto_send = False
+    else:
+        prompt = st.chat_input("Ask something...")
 
 with col2:
     voice = mic_recorder(
@@ -191,7 +234,7 @@ with col2:
         just_once=True
     )
 
-# ================= VOICE (JS) =================
+# ================= VOICE =================
 
 if st.button("🎤 Voice"):
     spoken = streamlit_js_eval(
@@ -213,28 +256,6 @@ if st.button("🎤 Voice"):
             "content": spoken
         })
         prompt = spoken
-
-# ================= VOICE (MIC) =================
-
-if voice:
-    import speech_recognition as sr
-    from pydub import AudioSegment
-    from io import BytesIO
-
-    audio_bytes = voice["bytes"]
-    audio = AudioSegment.from_file(BytesIO(audio_bytes))
-    audio.export("temp.wav", format="wav")
-
-    recognizer = sr.Recognizer()
-
-    with sr.AudioFile("temp.wav") as source:
-        audio_data = recognizer.record(source)
-
-    try:
-        prompt = recognizer.recognize_google(audio_data)
-        st.write("You said:", prompt)
-    except:
-        st.warning("Could not recognize speech")
 
 # ================= CHAT CALL =================
 
