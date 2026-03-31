@@ -53,7 +53,7 @@ OLLAMA_MODEL = "phi3:latest"
 
 # ✅ NEW GROQ CLIENT
 # 🔥 DIRECT API KEY (NO ENV NEEDED)
-GROQ_API_KEY = "YOUR GROW API KEY HERE"
+GROQ_API_KEY = "YOUR API KEY HERE "
 
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -304,8 +304,7 @@ def chat(uid: str = Query(...), message: str = Query(...)):
     docs = route["docs"]
 
     collected = []
-#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
-    for d in docs:
+
         raw = fetch_sop_text(d["doc_name"])
         clean = clean_sop_text(raw)
         collected.append(clean)
