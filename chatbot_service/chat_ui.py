@@ -1,4 +1,5 @@
 import streamlit as st
+import uuid  # ✅ FIX ADDED
 
 # ✅ MUST BE FIRST STREAMLIT CALL
 st.set_page_config(
@@ -62,7 +63,6 @@ if "context_cache" not in st.session_state:
 if "sops_cache" not in st.session_state:
     st.session_state.sops_cache = None
 
-# 🔥 NEW (for suggestion clicks)
 if "auto_send" not in st.session_state:
     st.session_state.auto_send = False
 
@@ -107,13 +107,28 @@ if not st.session_state.authenticated:
 st.sidebar.title("💬 Chat History")
 
 memory = load_memory()
-uid = st.session_state.uid
+uid = st.session_state.uid  # ✅ SAFE
 
 if uid in memory:
     for i, chat in enumerate(memory[uid]):
-        if st.sidebar.button(chat["title"], key=i):
-            st.session_state.messages = chat["messages"]
-            st.rerun()
+
+        col1, col2 = st.sidebar.columns([4, 1])
+
+        # 🔹 Load chat
+        with col1:
+            if st.button(chat["title"], key=f"chat_{i}"):
+                st.session_state.messages = chat["messages"]
+                st.rerun()
+
+        # 🔹 Delete chat
+        with col2:
+            if st.button("🗑️", key=f"delete_{i}"):
+
+                memory[uid].pop(i)  # 🔥 delete from memory
+                save_memory(memory)
+
+                st.session_state.messages = []  # reset UI
+                st.rerun()
 
 st.sidebar.title("📚 Available SOPs")
 
@@ -174,7 +189,7 @@ f"<div class='subtitle'>Hi {profile['employee_name']} — Where should we start?
 unsafe_allow_html=True
 )
 
-# ================= HELPER (NEW) =================
+# ================= HELPER =================
 
 def extract_suggestions(answer_text):
     suggestions = []
@@ -204,59 +219,21 @@ for msg in st.session_state.messages:
         main, sugg = extract_suggestions(msg["content"])
         st.markdown(f"<div class='bot-msg'>{main}</div>", unsafe_allow_html=True)
 
-        # 🔥 SHOW CLICKABLE SUGGESTIONS
-        if sugg:
+        if sugg and len(sugg) > 0:
+            st.markdown("### 💡 Try asking these questions")
             cols = st.columns(2)
             for i, s in enumerate(sugg):
                 with cols[i % 2]:
-                    if st.button(s, key=f"suggest_{i}_{msg['content'][:10]}"):
-                        st.session_state.user_input = s
-                        st.session_state.auto_send = True
+                    if st.button(s, key=f"suggest_{uuid.uuid4()}"):
+                        st.session_state["clicked_prompt"] = s
+                        st.rerun()
 
 # ================= INPUT =================
 
-from streamlit_mic_recorder import mic_recorder
-from streamlit_js_eval import streamlit_js_eval
-
-col1, col2 = st.columns([8,1])
-
-with col1:
-    if st.session_state.auto_send:
-        prompt = st.session_state.user_input
-        st.session_state.auto_send = False
-    else:
-        prompt = st.chat_input("Ask something...")
-
-with col2:
-    voice = mic_recorder(
-        start_prompt="🎤",
-        stop_prompt="⏹",
-        just_once=True
-    )
-
-# ================= VOICE =================
-
-if st.button("🎤 Voice"):
-    spoken = streamlit_js_eval(
-        js_expressions="""
-        new Promise((resolve) => {
-            const recognition = new webkitSpeechRecognition();
-            recognition.lang = 'en-US';
-            recognition.start();
-            recognition.onresult = (event) => {
-                resolve(event.results[0][0].transcript);
-            };
-        })
-        """
-    )
-
-    if spoken:
-        st.session_state.messages.append({
-            "role": "user",
-            "content": spoken
-        })
-        prompt = spoken
-
+prompt = st.chat_input("Ask something...")
+if "clicked_prompt" in st.session_state:
+    prompt = st.session_state["clicked_prompt"]
+    del st.session_state["clicked_prompt"]
 # ================= CHAT CALL =================
 
 if prompt:
@@ -272,8 +249,8 @@ if prompt:
             r = requests.post(
                 CHATBOT_URL,
                 params={
-                    "uid":st.session_state.uid,
-                    "message":prompt
+                    "uid": st.session_state.uid,
+                    "message": prompt
                 },
                 timeout=60
             )
@@ -294,7 +271,7 @@ if prompt:
     # ================= MEMORY SAVE =================
 
     memory = load_memory()
-    uid = st.session_state.uid
+    uid = st.session_state.uid  # ✅ FIX SAFE REASSIGN
 
     if uid not in memory:
         memory[uid] = []
