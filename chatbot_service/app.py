@@ -53,7 +53,7 @@ OLLAMA_MODEL = "phi3:latest"
 
 # ✅ NEW GROQ CLIENT
 # 🔥 DIRECT API KEY (NO ENV NEEDED)
-GROQ_API_KEY = "YOUR API KEY HERE "
+GROQ_API_KEY = "YOUR GROQ API KEY HERE"
 
 client = Groq(api_key=GROQ_API_KEY)
 
@@ -263,35 +263,81 @@ def run_evaluation(uid, message, sop_text, answer):
 
     except Exception as e:
         print("Evaluation failed:", e)
-def generate_prompt_suggestions(role, docs, user_query=None):
-    suggestions = []
+import random
 
-    # 🔹 Role-based base prompts
-    suggestions.extend([
+LAST_SUGGESTIONS = {}  # 🔥 memory per user
+
+
+def generate_prompt_suggestions(role, docs, user_query=None, uid=None):
+
+    base = [
         f"What are key responsibilities of a {role}?",
         f"What SOPs should a {role} follow daily?",
-        f"What are safety guidelines for {role}?"
-    ])
+        f"What are safety guidelines for {role}?",
+        f"How does {role} handle compliance issues?",
+        f"What are common mistakes a {role} should avoid?"
+    ]
 
-    # 🔹 SOP-based prompts
-    for d in docs[:3]:
-        name = d.get("doc_name", "").replace(".pdf","")
-        suggestions.append(f"Explain {name}")
-        suggestions.append(f"Key rules from {name}")
+    sop_based = []
+    for d in docs:
+        name = d.get("doc_name", "").replace(".pdf", "")
+        sop_based.extend([
+            f"Explain {name}",
+            f"Key rules from {name}",
+            f"Important points in {name}"
+        ])
 
-    # 🔹 Query-based refinement
+    query_based = []
     if user_query:
         q = user_query.lower()
 
         if "leave" in q:
-            suggestions.append("What is leave approval process?")
-        if "safety" in q:
-            suggestions.append("List all safety precautions")
-        if "policy" in q:
-            suggestions.append("Summarize company policies")
+            query_based.extend([
+                "What is leave approval workflow?",
+                "How many leave types exist?",
+                "What documents are required for leave?"
+            ])
 
-    # remove duplicates + limit
-    return list(dict.fromkeys(suggestions))[:5]
+        if "policy" in q:
+            query_based.extend([
+                "Summarize policy in simple terms",
+                "What are critical policy rules?",
+                "What happens if policy is violated?"
+            ])
+
+        if "safety" in q:
+            query_based.extend([
+                "List all safety precautions",
+                "How to report safety incidents?",
+                "What are safety violations?"
+            ])
+
+    # 🔥 combine WITHOUT set
+    all_suggestions = base + sop_based + query_based
+
+    # 🔥 shuffle strongly
+    random.shuffle(all_suggestions)
+
+    # 🔥 remove duplicates manually (preserve randomness)
+    seen = set()
+    unique = []
+    for s in all_suggestions:
+        if s not in seen:
+            unique.append(s)
+            seen.add(s)
+
+    # 🔥 avoid repeating last suggestions
+    if uid:
+        last = LAST_SUGGESTIONS.get(uid, [])
+        unique = [u for u in unique if u not in last]
+
+    final = unique[:5]
+
+    # 🔥 store for next time
+    if uid:
+        LAST_SUGGESTIONS[uid] = final
+
+    return final
 # ================= ROUTE =================
 
 @app.post("/chat")
@@ -304,12 +350,15 @@ def chat(uid: str = Query(...), message: str = Query(...)):
     docs = route["docs"]
 
     collected = []
-
+    for d in docs[:2]:  # 🔥 LIMIT DOCS
         raw = fetch_sop_text(d["doc_name"])
         clean = clean_sop_text(raw)
         collected.append(clean)
-
     sop_text = "\n\n".join(collected)
+    
+    MAX_CHARS = 3500
+    if len(sop_text) > MAX_CHARS:
+        sop_text = sop_text[:MAX_CHARS]
 
     prompt = build_prompt(context, sop_text, message, mode)
 
@@ -318,21 +367,21 @@ def chat(uid: str = Query(...), message: str = Query(...)):
     answer = guard_llm_output(answer)
 
     header = ""
+    final = answer  # default fallback
     if mode == "SOP" and docs:
         header = f"📄 Using {len(docs)} SOP document(s)\n\n"
         role = context.get("user_profile", {}).get("job_role_text", "Employee")
-        suggestions = generate_prompt_suggestions(role, docs, message)
+        suggestions = generate_prompt_suggestions(role, docs, message, uid)
         suggestion_text = "\n\n💡 You can also ask:\n"
         for s in suggestions:
             suggestion_text += f"- {s}\n"
         final = header + answer + suggestion_text
-
     print("FINAL:", final[:300])
 
     threading.Thread(
         target=run_evaluation,
         args=(uid, message, sop_text, final)
     ).start()
-
+    print("SUGGESTIONS:", suggestions)
     return {"answer": final}
     
