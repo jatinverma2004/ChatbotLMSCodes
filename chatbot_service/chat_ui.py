@@ -1,7 +1,8 @@
 import streamlit as st
-import uuid  # ✅ FIX ADDED
+import uuid
 
-# ✅ MUST BE FIRST STREAMLIT CALL
+# ================= CONFIG =================
+
 st.set_page_config(
     page_title="Employee Assistant",
     page_icon="🤖",
@@ -13,7 +14,10 @@ import json
 import os
 
 CHAT_DB = "chat_memory.json"
+MCP_BASE_URL = "http://127.0.0.1:8100"
+CHATBOT_URL = "http://127.0.0.1:9000/chat"
 
+# ================= MEMORY =================
 
 def load_memory():
     if not os.path.exists(CHAT_DB):
@@ -21,17 +25,11 @@ def load_memory():
     with open(CHAT_DB, "r") as f:
         return json.load(f)
 
-
 def save_memory(data):
     with open(CHAT_DB, "w") as f:
         json.dump(data, f, indent=2)
 
-# ================= CONFIG =================
-
-MCP_BASE_URL = "http://127.0.0.1:8100"
-CHATBOT_URL = "http://127.0.0.1:9000/chat"
-
-# ================= DARK THEME =================
+# ================= STYLES =================
 
 st.markdown("""
 <style>
@@ -63,11 +61,9 @@ if "context_cache" not in st.session_state:
 if "sops_cache" not in st.session_state:
     st.session_state.sops_cache = None
 
-if "auto_send" not in st.session_state:
-    st.session_state.auto_send = False
-
-if "user_input" not in st.session_state:
-    st.session_state.user_input = ""
+# 🔥 NEW (IMPORTANT)
+if "current_chat_id" not in st.session_state:
+    st.session_state.current_chat_id = None
 
 # ================= LOGIN =================
 
@@ -82,7 +78,6 @@ if not st.session_state.authenticated:
         res = requests.get(f"{MCP_BASE_URL}/api/context/{emp_id}")
 
         if res.status_code == 200:
-
             data = res.json()
 
             st.session_state.uid = emp_id
@@ -91,44 +86,53 @@ if not st.session_state.authenticated:
 
             name = data["user_profile"]["employee_name"]
 
-            st.session_state.messages.append({
-                "role":"assistant",
-                "content":f"Hi {name} 👋"
-            })
+            st.session_state.messages = [{
+                "role": "assistant",
+                "content": f"Hi {name} 👋"
+            }]
 
+            st.session_state.current_chat_id = None
             st.rerun()
-
         else:
             st.error("User not found")
 
     st.stop()
 
 # ================= SIDEBAR =================
+
 st.sidebar.title("💬 Chat History")
 
 memory = load_memory()
-uid = st.session_state.uid  # ✅ SAFE
+uid = st.session_state.uid
+
+# 🔥 NEW CHAT BUTTON
+if st.sidebar.button("➕ New Chat"):
+    st.session_state.messages = []
+    st.session_state.current_chat_id = None
+    st.rerun()
 
 if uid in memory:
     for i, chat in enumerate(memory[uid]):
 
         col1, col2 = st.sidebar.columns([4, 1])
 
-        # 🔹 Load chat
+        # LOAD CHAT
         with col1:
             if st.button(chat["title"], key=f"chat_{i}"):
                 st.session_state.messages = chat["messages"]
+                st.session_state.current_chat_id = chat["id"]
                 st.rerun()
 
-        # 🔹 Delete chat
+        # DELETE CHAT
         with col2:
             if st.button("🗑️", key=f"delete_{i}"):
-
-                memory[uid].pop(i)  # 🔥 delete from memory
+                memory[uid].pop(i)
                 save_memory(memory)
-
-                st.session_state.messages = []  # reset UI
+                st.session_state.messages = []
+                st.session_state.current_chat_id = None
                 st.rerun()
+
+# ================= SOP SIDEBAR =================
 
 st.sidebar.title("📚 Available SOPs")
 
@@ -148,9 +152,7 @@ sops = st.session_state.sops_cache
 
 role_docs = [
     s for s in sops
-    if str(s.get("job_role_code","")).upper()
-    ==
-    str(role_code).upper()
+    if str(s.get("job_role_code","")).upper() == str(role_code).upper()
 ]
 
 for sop in role_docs:
@@ -158,25 +160,7 @@ for sop in role_docs:
     version = sop["version"]
 
     with st.sidebar.expander(f"{name} (v{version})"):
-        st.link_button(
-            "Open Document",
-            f"{MCP_BASE_URL}/api/sop/open/{name}"
-        )
-
-st.sidebar.title("⚙️ Controls")
-mode = st.sidebar.toggle("Admin Mode", key="admin_toggle")
-
-if mode:
-    import admin_dashboard
-    admin_dashboard.render_dashboard()
-    st.stop()
-
-if st.sidebar.button("🗑️ Clear Chat History"):
-    if uid in memory:
-        memory[uid] = []
-        save_memory(memory)
-        st.session_state.messages = []
-        st.rerun()
+        st.link_button("Open Document", f"{MCP_BASE_URL}/api/sop/open/{name}")
 
 # ================= HEADER =================
 
@@ -185,8 +169,8 @@ profile = ctx["user_profile"]
 st.markdown("<div class='big-title'>Employee Skill Assistant</div>", unsafe_allow_html=True)
 
 st.markdown(
-f"<div class='subtitle'>Hi {profile['employee_name']} — Where should we start?</div>",
-unsafe_allow_html=True
+    f"<div class='subtitle'>Hi {profile['employee_name']} — Where should we start?</div>",
+    unsafe_allow_html=True
 )
 
 # ================= HELPER =================
@@ -198,9 +182,7 @@ def extract_suggestions(answer_text):
     if "💡 You can also ask:" in answer_text:
         parts = answer_text.split("💡 You can also ask:")
         main_answer = parts[0]
-
-        suggestion_block = parts[1]
-        lines = suggestion_block.strip().split("\n")
+        lines = parts[1].strip().split("\n")
 
         for l in lines:
             l = l.replace("- ", "").strip()
@@ -219,28 +201,17 @@ for msg in st.session_state.messages:
         main, sugg = extract_suggestions(msg["content"])
         st.markdown(f"<div class='bot-msg'>{main}</div>", unsafe_allow_html=True)
 
-        if sugg and len(sugg) > 0:
-            st.markdown("### 💡 Try asking these questions")
-            cols = st.columns(2)
-            for i, s in enumerate(sugg):
-                with cols[i % 2]:
-                    if st.button(s, key=f"suggest_{uuid.uuid4()}"):
-                        st.session_state["clicked_prompt"] = s
-                        st.rerun()
-
 # ================= INPUT =================
 
 prompt = st.chat_input("Ask something...")
-if "clicked_prompt" in st.session_state:
-    prompt = st.session_state["clicked_prompt"]
-    del st.session_state["clicked_prompt"]
+
 # ================= CHAT CALL =================
 
 if prompt:
 
     st.session_state.messages.append({
-        "role":"user",
-        "content":prompt
+        "role": "user",
+        "content": prompt
     })
 
     with st.spinner("Thinking..."):
@@ -261,31 +232,40 @@ if prompt:
                 answer = f"Server error: {r.status_code}"
 
         except Exception as e:
-            answer= f"Error: {str(e)}"
+            answer = f"Error: {str(e)}"
 
     st.session_state.messages.append({
-        "role":"assistant",
-        "content":answer
+        "role": "assistant",
+        "content": answer
     })
 
-    # ================= MEMORY SAVE =================
+    # ================= FIXED MEMORY LOGIC =================
 
     memory = load_memory()
-    uid = st.session_state.uid  # ✅ FIX SAFE REASSIGN
 
     if uid not in memory:
         memory[uid] = []
 
-    title = "New Chat"
-    for msg in st.session_state.messages:
-        if msg["role"] == "user":
-            title = msg["content"][:40]
-            break
+    # 🔥 CREATE NEW CHAT ONLY ON FIRST MESSAGE
+    if st.session_state.current_chat_id is None:
 
-    memory[uid].append({
-        "title": title,
-        "messages": st.session_state.messages
-    })
+        chat_id = str(uuid.uuid4())
+        title = prompt[:40]
+
+        memory[uid].append({
+            "id": chat_id,
+            "title": title,
+            "messages": st.session_state.messages
+        })
+
+        st.session_state.current_chat_id = chat_id
+
+    else:
+        # 🔥 UPDATE EXISTING CHAT
+        for chat in memory[uid]:
+            if chat["id"] == st.session_state.current_chat_id:
+                chat["messages"] = st.session_state.messages
+                break
 
     save_memory(memory)
     st.rerun()
