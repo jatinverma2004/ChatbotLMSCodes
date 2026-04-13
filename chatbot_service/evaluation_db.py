@@ -1,18 +1,19 @@
 import sqlite3
 import os
 
+# ================= DB PATH =================
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "evaluation.db")
 
+# ================= INIT =================
 
 def init_db():
-
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS chat_evaluation (
-
+    CREATE TABLE IF NOT EXISTS evaluations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         uid TEXT,
         question TEXT,
@@ -21,33 +22,50 @@ def init_db():
         accuracy REAL,
         precision REAL,
         recall REAL,
+        verdict TEXT,
+        reason TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-
     )
     """)
 
     conn.commit()
     conn.close()
 
+# ================= INSERT =================
 
-def insert_record(data):
+def insert_record(data: dict):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+        cursor.execute("""
+        INSERT INTO evaluations (
+            uid,
+            question,
+            retrieved_context,
+            answer,
+            accuracy,
+            precision,
+            recall,
+            verdict,
+            reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            data.get("uid"),
+            data.get("question"),
+            data.get("retrieved_context"),
+            data.get("answer"),
+            data.get("accuracy"),
+            data.get("precision"),
+            data.get("recall"),
+            data.get("verdict"),
+            data.get("reason")
+        ))
 
-    cursor.execute("""
-    INSERT INTO chat_evaluation
-    (uid, question, retrieved_context, answer, accuracy, precision, recall)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        data["uid"],
-        data["question"],
-        data["retrieved_context"],
-        data["answer"],
-        data["accuracy"],
-        data["precision"],
-        data["recall"]
-    ))
+        conn.commit()
+        conn.close()
 
-    conn.commit()
-    conn.close()
+        print("✅ DB INSERT SUCCESS")
+
+    except Exception as e:
+        print("🔥 DB INSERT ERROR:", str(e))
