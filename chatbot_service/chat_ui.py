@@ -3,6 +3,7 @@ import uuid
 import requests
 import json
 import os
+import time
 
 # ================= CONFIG =================
 
@@ -42,6 +43,168 @@ section[data-testid="stSidebar"] * {color:white !important;}
 .subtitle {text-align:center;font-size:20px;color:#94a3b8;margin-bottom:40px;}
 </style>
 """, unsafe_allow_html=True)
+
+# ================= SPLASH SCREEN =================
+
+if "splash_shown" not in st.session_state:
+    st.session_state.splash_shown = False
+
+if not st.session_state.splash_shown:
+
+    splash = st.empty()
+
+    splash.markdown("""
+    <style>
+    /* Hide all default Streamlit chrome during splash */
+    header[data-testid="stHeader"],
+    section[data-testid="stSidebar"],
+    footer {
+        display: none !important;
+    }
+
+    .splash-overlay {
+        position: fixed;
+        inset: 0;
+        background: #0b0f19;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+        animation: fadeOut 0.6s ease-in-out 2.4s forwards;
+    }
+
+    @keyframes fadeOut {
+        from { opacity: 1; }
+        to   { opacity: 0; pointer-events: none; }
+    }
+
+    /* Glowing ring around the logo — Jio blue */
+    .splash-logo-ring {
+        width: 140px;
+        height: 140px;
+        border-radius: 50%;
+        border: 3px solid #0066cc;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        animation: pulse-ring 1.8s ease-in-out infinite, scaleInRing 0.5s ease 0.1s both;
+        margin-bottom: 28px;
+    }
+
+    @keyframes pulse-ring {
+        0%   { box-shadow: 0 0 0 0 rgba(0,102,204,0.6); }
+        70%  { box-shadow: 0 0 0 20px rgba(0,102,204,0); }
+        100% { box-shadow: 0 0 0 0 rgba(0,102,204,0); }
+    }
+
+    @keyframes scaleInRing {
+        from { transform: scale(0.6); opacity: 0; }
+        to   { transform: scale(1);   opacity: 1; }
+    }
+
+    /* Logo image container */
+    .splash-logo-inner {
+        width: 110px;
+        height: 110px;
+        border-radius: 50%;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        animation: scaleIn 0.5s cubic-bezier(0.34,1.56,0.64,1) 0.2s both;
+        background: #ffffff;
+    }
+
+    .splash-logo-inner img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+    }
+
+    @keyframes scaleIn {
+        from { transform: scale(0); opacity: 0; }
+        to   { transform: scale(1); opacity: 1; }
+    }
+
+    /* Company name */
+    .splash-company-name {
+        font-family: 'Segoe UI', sans-serif;
+        font-size: 30px;
+        font-weight: 700;
+        color: #ffffff;
+        letter-spacing: 2px;
+        animation: slideUp 0.5s ease 0.6s both;
+        margin-bottom: 6px;
+    }
+
+    /* "Jio" part styled in Jio blue */
+    .splash-company-name .jio-blue {
+        color: #0099ff;
+    }
+
+    .splash-tagline {
+        font-family: 'Segoe UI', sans-serif;
+        font-size: 14px;
+        color: #64748b;
+        letter-spacing: 1px;
+        animation: slideUp 0.5s ease 0.8s both;
+    }
+
+    /* Loading bar */
+    .splash-loader {
+        margin-top: 40px;
+        width: 200px;
+        height: 3px;
+        background: #1e293b;
+        border-radius: 999px;
+        overflow: hidden;
+        animation: slideUp 0.4s ease 1s both;
+    }
+
+    .splash-loader-bar {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #0066cc, #00aaff);
+        border-radius: 999px;
+        animation: loadBar 1.8s ease 1s forwards;
+    }
+
+    @keyframes loadBar {
+        0%   { width: 0%; }
+        60%  { width: 75%; }
+        100% { width: 100%; }
+    }
+
+    @keyframes slideUp {
+        from { transform: translateY(16px); opacity: 0; }
+        to   { transform: translateY(0);    opacity: 1; }
+    }
+    </style>
+
+    <div class="splash-overlay">
+        <div class="splash-logo-ring">
+            <div class="splash-logo-inner">
+                <img
+                    src="https://upload.wikimedia.org/wikipedia/commons/thumb/b/bf/Reliance_Jio_Logo.svg/330px-Reliance_Jio_Logo.svg.png"
+                    alt="Reliance Jio Logo"
+                />
+            </div>
+        </div>
+        <div class="splash-company-name">Reliance <span class="jio-blue">Jio</span></div>
+        <div class="splash-tagline">Employee Assistant Portal</div>
+        <div class="splash-loader">
+            <div class="splash-loader-bar"></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Wait for splash animation to complete (fade-out starts at 2.4s + 0.6s fade = 3s total)
+    time.sleep(3)
+
+    splash.empty()
+    st.session_state.splash_shown = True
+    st.rerun()
 
 # ================= SESSION =================
 
