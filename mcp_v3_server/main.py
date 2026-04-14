@@ -1,8 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse
+from sop_text_extractor import extract_text
 import sqlite3
 import os
 import shutil
+import subprocess
+
 
 app = FastAPI(title="MCP V3 Server")
 
@@ -130,28 +133,35 @@ async def add_user(
 
     conn = get_conn()
     cursor = conn.cursor()
-
     cursor.execute("""
-    INSERT OR REPLACE INTO user_profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """,(
-        uid,
-        employee_code,
-        employee_name,
-        job_role_code,
-        job_role_text,
-        date_of_joining,
-        org_unit,
-        job_work_area,
-        job_work_stream,
-        function,
-        sub_function,
-        company,
-        state,
-        region,
-        facility,
-        category_l1,
-        l1_employee_code
-    ))
+                   INSERT OR REPLACE INTO user_profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   """,(
+                       uid,
+                       employee_code,
+                       employee_name,
+                       job_role_code,
+                       job_role_text,
+                       date_of_joining,
+                       org_unit,
+                       job_work_area,
+                       job_work_stream,
+                       function,
+                       sub_function,
+                       company,
+                       state,
+                       region,
+                       facility,
+                       category_l1,
+                       l1_employee_code
+                    ))
+    cursor.execute("""
+                   INSERT OR IGNORE INTO user_auth (uid, password, role)
+                   VALUES (?, ?, ?)
+                   """, (
+                       uid,
+                       "1234",  # default password
+                       "employee"
+                    ))
 
     conn.commit()
     conn.close()
@@ -195,33 +205,55 @@ def context(uid: str):
     return {"user_profile":profile}
 
 # ================= SOP UPLOAD =================
-
 @app.post("/api/sop/upload")
 async def upload_sop(
     doc_name: str = Form(...),
-    job_role_code: str = Form(""),
-    job_role_text: str = Form(""),
-    version: str = Form("v1.0"),
+    job_role_code: str = Form(...),
+    job_role_text: str = Form(...),
+    version: str = Form(...),
     file: UploadFile = File(...)
 ):
-
-    file_path = os.path.join(SOP_DIR, file.filename)
-
-    with open(file_path,"wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
 
     conn = get_conn()
     cursor = conn.cursor()
 
+    # Save file
+    file_path = os.path.join(SOP_DIR, file.filename)
+
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    # Extract text from SOP
+    text = extract_text(file_path, file.filename)
+
+    # Save SOP metadata
     cursor.execute("""
-    INSERT INTO sop_registry(doc_name,job_role_code,job_role_text,file_path,version,doc_type)
-    VALUES (?,?,?,?,?,?)
-    """,(doc_name,job_role_code,job_role_text,file_path,version,"ROLE"))
+        INSERT INTO sop_registry
+        (doc_name, job_role_code, job_role_text, file_path, version)
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        doc_name,
+        job_role_code,
+        job_role_text,
+        file_path,
+        version
+    ))
 
     conn.commit()
     conn.close()
 
-    return {"message":"SOP uploaded successfully"}
+    # Rebuild embeddings automatically
+    try:
+        subprocess.run(
+            ["python", "generate_embeddings.py"],
+            cwd=BASE_DIR
+        )
+        print("Embeddings rebuilt")
+
+    except Exception as e:
+        print("Embedding rebuild failed:", e)
+
+    return {"message": "SOP uploaded successfully"}
 
 # 🔥 THIS FORMAT MATCHES chat_ui.py EXACTLY
 @app.get("/api/sops")
@@ -497,6 +529,8 @@ async def save_role_skill_map(
         INSERT INTO job_role_skills(job_role_code,skill_level,proficiency,criticality)
         VALUES (?,?,?,?)
     """,(job_role_code,skill_level,proficiency,criticality))
+
+    
 
     conn.commit()
     conn.close()
