@@ -1,6 +1,15 @@
 LMS ENTERPRISE CHATBOT SYSTEM
 Run Instructions (Windows CMD)
 
+
+[React Updated commands]
+1.open the cmd terminal and direct to the jio-assistant-react folder
+2. enter below commands along with the old commands of backend servers
+pip install groq
+npm install -g serve
+npx serve -s build
+uvicorn app:app --host 127.0.0.1 --port 9000 --reload
+
 1. CREATE / ACTIVATE PYTHON VIRTUAL ENVIRONMENT
 
 cd mcp_v3_server
