@@ -42,6 +42,15 @@ init_db()
 ensure_dashboard_table()
 
 app = FastAPI(title="Employee Skill Chatbot")
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ================= CONFIG =================
 
@@ -52,7 +61,7 @@ OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 OLLAMA_MODEL = "phi3:latest"
 
 # ✅ GROQ CLIENT
-GROQ_API_KEY = ""
+GROQ_API_KEY = "YOUR API KEY HERE "
 client = Groq(api_key=GROQ_API_KEY)
 print("✅ GROQ CLIENT INITIALIZED")
 
@@ -464,3 +473,25 @@ def chat(uid: str = Query(...), message: str = Query(...)):
         print("SUGGESTIONS:", suggestions)
 
     return {"answer": final}
+
+# ================= DASHBOARD DATA =================
+
+@app.get("/dashboard/data")
+def dashboard_data():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM evaluations ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+        columns = [c[0] for c in cursor.description]
+        conn.close()
+
+        result = []
+        for row in rows:
+            result.append(dict(zip(columns, row)))
+
+        return result
+
+    except Exception as e:
+        print("Dashboard error:", e)
+        return []
