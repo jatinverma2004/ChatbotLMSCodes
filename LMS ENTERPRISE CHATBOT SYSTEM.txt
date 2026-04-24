@@ -1,7 +1,20 @@
 LMS ENTERPRISE CHATBOT SYSTEM
 Run Instructions (Windows CMD)
 
+Docker (Easiest):
+1. docker run -d -p 27017:27017 --name mongodb mongo
+2. That's it! MongoDB running on port 27017
+ 
 
+Run these commands in your chatbot_service and mcp_v3_server directories:
+ 
+pip install pymongo --break-system-packages
+pip install python-multipart --break-system-packages
+pip install pillow --break-system-packages
+pip install openpyxl --break-system-packages
+pip install python-docx --break-system-packages
+pip install pdfplumber --break-system-packages
+ 
 [React Updated commands]
 1.open the cmd terminal and direct to the jio-assistant-react folder
 2. enter below commands along with the old commands of backend servers
