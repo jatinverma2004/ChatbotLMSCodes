@@ -61,7 +61,7 @@ OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 OLLAMA_MODEL = "phi3:latest"
 
 # ✅ GROQ CLIENT
-GROQ_API_KEY = "YOUR API KEY HERE "
+GROQ_API_KEY = "YOUR_API_KEY_HERE"
 client = Groq(api_key=GROQ_API_KEY)
 print("✅ GROQ CLIENT INITIALIZED")
 
