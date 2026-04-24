@@ -25,19 +25,93 @@ export default function ChatPage({ user, onLogout, onNav }) {
   const [loading, setLoading] = useState(false);
   const [sops, setSops] = useState([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [uploadPanel, setUploadPanel] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState([]);
+  const [uploadLoading, setUploadLoading] = useState(false);
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  // Supported file types for upload
+  const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'doc', 'xlsx', 'xls', 'csv', 'txt', 'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'];
 
   useEffect(() => {
     fetch(`${API}/api/sops`).then(r => r.json()).then(data => {
       const allSops = data.rows.map(r => Object.fromEntries(data.columns.map((c, i) => [c, r[i]])));
       setSops(allSops.filter(s => s.job_role_code?.toUpperCase() === profile.job_role_code?.toUpperCase()));
     }).catch(() => {});
-  }, [profile.job_role_code]);
+
+    // Load user's uploaded files
+    fetchUserFiles();
+  }, [profile.job_role_code, uid]);
+
+  const fetchUserFiles = async () => {
+    try {
+      const r = await fetch(`${API}/api/user/files/${uid}`);
+      const data = await r.json();
+      if (data.rows) {
+        setUploadedFiles(data.rows.map(row => Object.fromEntries(data.columns.map((col, i) => [col, row[i]]))));
+      }
+    } catch (e) {
+      console.log('Could not fetch user files');
+    }
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
+
+  const handleFileSelect = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+      alert(`File type .${ext} not allowed.\nAllowed: ${ALLOWED_EXTENSIONS.join(', ')}`);
+      return;
+    }
+
+    if (file.size > 50 * 1024 * 1024) {
+      alert('File size must be less than 50MB');
+      return;
+    }
+
+    setUploadLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('uid', uid);
+      formData.append('file_type', ext.match(/png|jpg|jpeg|gif|bmp|webp/) ? 'snapshot' : 'document');
+      formData.append('file_description', '');
+      formData.append('file', file);
+
+      const r = await fetch(`${API}/api/user/upload-file`, {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await r.json();
+      if (data.message) {
+        setMessages(m => [...m, {
+          role: 'assistant',
+          content: `✓ ${data.message}\n📄 File: ${file.name}\n📊 Size: ${(file.size / 1024).toFixed(2)} KB`
+        }]);
+        fetchUserFiles();
+      } else {
+        setMessages(m => [...m, {
+          role: 'assistant',
+          content: `✗ Upload failed: ${data.error}`
+        }]);
+      }
+    } catch (e) {
+      setMessages(m => [...m, {
+        role: 'assistant',
+        content: `✗ Upload error: ${e.message}`
+      }]);
+    } finally {
+      setUploadLoading(false);
+      fileInputRef.current.value = '';
+    }
+  };
 
   const sendMessage = useCallback(async (text) => {
     if (!text.trim() || loading) return;
@@ -157,9 +231,23 @@ export default function ChatPage({ user, onLogout, onNav }) {
           margin-bottom: 4px; cursor: pointer; transition: background 0.15s;
         }
         .sop-item:hover { background: rgba(0,153,255,0.06); border-color: rgba(0,153,255,0.2); }
+        .upload-panel {
+          background: rgba(0,102,204,0.1); border: 1px solid rgba(0,153,255,0.3);
+          border-radius: 10px; padding: 12px;
+          margin-bottom: 12px;
+        }
+        .file-list {
+          max-height: 150px; overflow-y: auto;
+          font-size: 11px; color: #7a8aaa;
+        }
+        .file-item {
+          background: rgba(255,255,255,0.02); padding: 6px 8px;
+          border-radius: 6px; margin-bottom: 4px;
+          display: flex; justify-content: space-between; align-items: center;
+        }
       `}</style>
 
-      {/* ── SIDEBAR ── */}
+      {/* SIDEBAR */}
       {sidebarOpen && (
         <div style={{
           width: 240, minWidth: 240, height: '100vh',
@@ -182,12 +270,75 @@ export default function ChatPage({ user, onLogout, onNav }) {
             </div>
           </div>
 
-          {/* New chat */}
+          {/* Upload Panel */}
           <div style={{ padding: '12px 10px 0' }}>
-            <button onClick={newChat} style={{
+            <button onClick={() => setUploadPanel(!uploadPanel)} style={{
               width: '100%', padding: '9px 12px',
               background: 'rgba(0,153,255,0.1)', border: '1px solid rgba(0,153,255,0.2)',
               borderRadius: 9, color: '#0099ff', fontSize: 13, cursor: 'pointer',
+              fontFamily: 'DM Sans, sans-serif', fontWeight: 500,
+              display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center',
+              transition: 'background 0.15s',
+              marginBottom: uploadPanel ? 10 : 0
+            }}>
+              <span style={{ fontSize: 16 }}>📤</span> Upload File
+            </button>
+
+            {uploadPanel && (
+              <div className="upload-panel">
+                <div style={{ fontSize: 11, color: '#7a8aaa', marginBottom: 8 }}>
+                  📁 Supported formats:
+                </div>
+                <div style={{ fontSize: 10, color: '#5a7a9a', marginBottom: 10 }}>
+                  Images: PNG, JPG, GIF, BMP, WebP
+                  Documents: PDF, DOCX, DOC, XLSX, XLS, CSV, TXT
+                </div>
+                <button onClick={() => fileInputRef.current?.click()} style={{
+                  width: '100%', padding: '8px',
+                  background: 'rgba(0,153,255,0.2)', border: '1px dashed rgba(0,153,255,0.4)',
+                  borderRadius: 8, color: '#0099ff', fontSize: 12, cursor: 'pointer',
+                  fontFamily: 'DM Sans, sans-serif'
+                }}>
+                  {uploadLoading ? 'Uploading...' : 'Click to select file'}
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  style={{ display: 'none' }}
+                  accept=".pdf,.docx,.doc,.xlsx,.xls,.csv,.txt,.png,.jpg,.jpeg,.gif,.bmp,.webp"
+                  onChange={handleFileSelect}
+                  disabled={uploadLoading}
+                />
+
+                {uploadedFiles.length > 0 && (
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                    <div style={{ fontSize: 11, color: '#7a8aaa', marginBottom: 6 }}>
+                      📂 Recent uploads: ({uploadedFiles.length})
+                    </div>
+                    <div className="file-list">
+                      {uploadedFiles.slice(0, 5).map((f, i) => (
+                        <div key={i} className="file-item">
+                          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {f.file_name}
+                          </span>
+                          <span style={{ color: '#5a7a9a', marginLeft: 4 }}>
+                            {(f.file_size / 1024).toFixed(0)}KB
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* New Chat */}
+          <div style={{ padding: uploadPanel ? '0 10px' : '12px 10px 0' }}>
+            <button onClick={newChat} style={{
+              width: '100%', padding: '9px 12px',
+              background: 'rgba(0,200,100,0.1)', border: '1px solid rgba(0,200,100,0.2)',
+              borderRadius: 9, color: '#00d68f', fontSize: 13, cursor: 'pointer',
               fontFamily: 'DM Sans, sans-serif', fontWeight: 500,
               display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center',
               transition: 'background 0.15s',
@@ -290,7 +441,7 @@ export default function ChatPage({ user, onLogout, onNav }) {
         </div>
       )}
 
-      {/* ── MAIN CHAT ── */}
+      {/* MAIN CHAT */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
         {/* Header */}
         <div style={{
@@ -376,13 +527,11 @@ export default function ChatPage({ user, onLogout, onNav }) {
             background: '#0c1120', border: '1px solid rgba(255,255,255,0.08)',
             borderRadius: 14, padding: '12px 14px',
             transition: 'border-color 0.2s',
-          }}
-            onFocus={() => {}}
-          >
+          }}>
             <textarea
               ref={inputRef}
               className="chat-input"
-              placeholder="Ask anything about your SOPs or role..."
+              placeholder="Ask anything about your SOPs or role... Or upload files!"
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => {
@@ -405,7 +554,7 @@ export default function ChatPage({ user, onLogout, onNav }) {
             </button>
           </div>
           <div style={{ textAlign: 'center', fontSize: 10, color: '#3d4d66', marginTop: 8 }}>
-            Enter to send · Shift+Enter for new line
+            Enter to send · Shift+Enter for new line · Use upload button for files
           </div>
         </div>
       </div>
