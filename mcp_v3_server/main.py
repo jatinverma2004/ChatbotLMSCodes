@@ -1,15 +1,20 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse
-from sop_text_extractor import extract_text
-import sqlite3
+from fastapi.middleware.cors import CORSMiddleware
+from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 import os
 import shutil
 import subprocess
+from datetime import datetime
+import mimetypes
 
+# Import document extraction
+from sop_text_extractor import extract_text
 
-app = FastAPI(title="MCP V3 Server")
-from fastapi.middleware.cors import CORSMiddleware
+app = FastAPI(title="MCP V3 Server - MongoDB Edition")
 
+# ================= CORS CONFIGURATION =================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,103 +26,117 @@ app.add_middleware(
 # ================= PATHS =================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "mcp_v3.db")
-SOP_DIR = os.path.join(BASE_DIR, "sop_storage")
+STORAGE_DIR = os.path.join(BASE_DIR, "file_storage")
 
-if not os.path.exists(SOP_DIR):
-    os.makedirs(SOP_DIR)
+# Create storage directories
+for subdir in ["sops", "user_uploads", "snapshots"]:
+    os.makedirs(os.path.join(STORAGE_DIR, subdir), exist_ok=True)
 
-def get_conn():
-    return sqlite3.connect(DB_PATH)
+# ================= MONGODB CONFIGURATION =================
 
-# ================= DB INIT =================
+MONGO_URI = "mongodb://localhost:27017"  # Update if using remote MongoDB
+MONGO_DB_NAME = "jio_lms_chatbot"
 
-conn = get_conn()
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS user_profiles (
-    uid TEXT PRIMARY KEY,
-    emp_code TEXT,
-    employee_name TEXT,
-    job_role_code TEXT,
-    job_role_text TEXT,
-    date_of_joining TEXT,
-    org_unit_text TEXT,
-    job_work_area TEXT,
-    job_work_stream TEXT,
-    function_text TEXT,
-    sub_function_text TEXT,
-    company_text TEXT,
-    state TEXT,
-    region TEXT,
-    facility TEXT,
-    category_l1_name TEXT,
-    l1_emp_code TEXT
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS sop_registry (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    doc_name TEXT,
-    job_role_code TEXT,
-    job_role_text TEXT,
-    file_path TEXT,
-    version TEXT,
-    doc_type TEXT DEFAULT 'ROLE'
-)
-""")
-# ================= SAFE MIGRATION FOR OLD DB =================
 try:
-    cursor.execute("ALTER TABLE sop_registry ADD COLUMN skill_level TEXT DEFAULT 'S2'")
+    mongo_client = MongoClient(MONGO_URI)
+    db = mongo_client[MONGO_DB_NAME]
+    print(f"✓ MongoDB connected to {MONGO_DB_NAME}")
 except Exception as e:
-    print("skill_level column already exists or migration skipped")
+    print(f"✗ MongoDB connection failed: {e}")
+    print("Ensure MongoDB is running: mongod")
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS job_role_skills (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_role_code TEXT,
-    skill_level TEXT,
-    proficiency TEXT,
-    criticality TEXT
-)
-""")
-# ================= SKILL REGISTRY TABLES (PHASE 1) =================
+# ================= DATABASE INITIALIZATION =================
 
-try:
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS skills_registry (
-        skill_id TEXT PRIMARY KEY,
-        skill_name TEXT,
-        proficiency TEXT,
-        criticality TEXT
-    )
-    """)
-except:
-    pass
+def init_mongodb():
+    """Initialize MongoDB collections with indexes"""
+    try:
+        # USER_PROFILES Collection
+        if "user_profiles" not in db.list_collection_names():
+            db.create_collection("user_profiles")
+            db["user_profiles"].create_index("uid", unique=True)
+            print("✓ Created user_profiles collection")
 
-try:
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS user_skills_map (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid TEXT,
-        skill_id TEXT
-    )
-    """)
-except:
-    pass
+        # SOP_REGISTRY Collection
+        if "sop_registry" not in db.list_collection_names():
+            db.create_collection("sop_registry")
+            db["sop_registry"].create_index("doc_name")
+            db["sop_registry"].create_index("job_role_code")
+            print("✓ Created sop_registry collection")
 
-conn.commit()
-conn.close()
+        # USER_UPLOADS Collection (NEW - for user file uploads)
+        if "user_uploads" not in db.list_collection_names():
+            db.create_collection("user_uploads")
+            db["user_uploads"].create_index("uid")
+            db["user_uploads"].create_index("upload_date")
+            print("✓ Created user_uploads collection")
 
-# ================= HEALTH =================
+        # SNAPSHOTS Collection (NEW - for screenshot/snapshot uploads)
+        if "snapshots" not in db.list_collection_names():
+            db.create_collection("snapshots")
+            db["snapshots"].create_index("uid")
+            db["snapshots"].create_index("capture_date")
+            print("✓ Created snapshots collection")
+
+        # SKILLS_REGISTRY Collection
+        if "skills_registry" not in db.list_collection_names():
+            db.create_collection("skills_registry")
+            db["skills_registry"].create_index("skill_id", unique=True)
+            print("✓ Created skills_registry collection")
+
+        # JOB_ROLE_SKILLS Collection
+        if "job_role_skills" not in db.list_collection_names():
+            db.create_collection("job_role_skills")
+            db["job_role_skills"].create_index("job_role_code")
+            print("✓ Created job_role_skills collection")
+
+        # USER_SKILLS_MAP Collection
+        if "user_skills_map" not in db.list_collection_names():
+            db.create_collection("user_skills_map")
+            db["user_skills_map"].create_index("uid")
+            print("✓ Created user_skills_map collection")
+
+        # USER_AUTH Collection
+        if "user_auth" not in db.list_collection_names():
+            db.create_collection("user_auth")
+            db["user_auth"].create_index("uid", unique=True)
+            print("✓ Created user_auth collection")
+
+    except Exception as e:
+        print(f"Error initializing MongoDB: {e}")
+
+# Initialize collections
+init_mongodb()
+
+# ================= SUPPORTED FILE TYPES =================
+
+ALLOWED_EXTENSIONS = {
+    'pdf': 'application/pdf',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'doc': 'application/msword',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'xls': 'application/vnd.ms-excel',
+    'csv': 'text/csv',
+    'txt': 'text/plain',
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'gif': 'image/gif',
+    'bmp': 'image/bmp',
+    'webp': 'image/webp',
+}
+
+# ================= HEALTH CHECK =================
 
 @app.get("/")
 def health():
-    return {"status": "MCP V3 running"}
+    mongo_status = "connected" if mongo_client.server_info() else "disconnected"
+    return {
+        "status": "MCP V3 running",
+        "database": "MongoDB",
+        "mongo_status": mongo_status
+    }
 
-# ================= USERS =================
+# ================= USER MANAGEMENT =================
 
 @app.post("/api/user/add")
 async def add_user(
@@ -139,81 +158,69 @@ async def add_user(
     category_l1: str = Form(""),
     l1_employee_code: str = Form("")
 ):
-
-    conn = get_conn()
-    cursor = conn.cursor()
-    cursor.execute("""
-                   INSERT OR REPLACE INTO user_profiles VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                   """,(
-                       uid,
-                       employee_code,
-                       employee_name,
-                       job_role_code,
-                       job_role_text,
-                       date_of_joining,
-                       org_unit,
-                       job_work_area,
-                       job_work_stream,
-                       function,
-                       sub_function,
-                       company,
-                       state,
-                       region,
-                       facility,
-                       category_l1,
-                       l1_employee_code
-                    ))
-    cursor.execute("""
-                   INSERT OR IGNORE INTO user_auth (uid, password, role)
-                   VALUES (?, ?, ?)
-                   """, (
-                       uid,
-                       "1234",  # default password
-                       "employee"
-                    ))
-
-    conn.commit()
-    conn.close()
-
-    return {"message":"User added successfully"}
+    try:
+        user_data = {
+            "uid": uid,
+            "emp_code": employee_code,
+            "employee_name": employee_name,
+            "job_role_code": job_role_code,
+            "job_role_text": job_role_text,
+            "date_of_joining": date_of_joining,
+            "org_unit_text": org_unit,
+            "job_work_area": job_work_area,
+            "job_work_stream": job_work_stream,
+            "function_text": function,
+            "sub_function_text": sub_function,
+            "company_text": company,
+            "state": state,
+            "region": region,
+            "facility": facility,
+            "category_l1_name": category_l1,
+            "l1_emp_code": l1_employee_code,
+            "created_at": datetime.utcnow()
+        }
+        
+        db["user_profiles"].update_one(
+            {"uid": uid},
+            {"$set": user_data},
+            upsert=True
+        )
+        
+        # Create auth record
+        db["user_auth"].update_one(
+            {"uid": uid},
+            {"$set": {"uid": uid, "password": "1234", "role": "employee"}},
+            upsert=True
+        )
+        
+        return {"message": "User added successfully"}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/api/users")
-def users():
-
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM user_profiles")
-
-    rows = cursor.fetchall()
-    columns = [c[0] for c in cursor.description]
-
-    conn.close()
-
-    return {"columns":columns,"rows":rows}
-
-# ================= CONTEXT =================
+def list_users():
+    try:
+        users = list(db["user_profiles"].find({}, {"_id": 0}))
+        if users:
+            columns = list(users[0].keys())
+            rows = [[user.get(col) for col in columns] for user in users]
+            return {"columns": columns, "rows": rows}
+        return {"columns": [], "rows": []}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/api/context/{uid}")
-def context(uid: str):
+def get_context(uid: str):
+    try:
+        user = db["user_profiles"].find_one({"uid": uid}, {"_id": 0})
+        if not user:
+            return {"error": "User not found"}
+        return {"user_profile": user}
+    except Exception as e:
+        return {"error": str(e)}
 
-    conn = get_conn()
-    cursor = conn.cursor()
+# ================= SOP MANAGEMENT =================
 
-    cursor.execute("SELECT * FROM user_profiles WHERE uid=?",(uid,))
-    row = cursor.fetchone()
-
-    if not row:
-        return {"error":"User not found"}
-
-    columns = [c[0] for c in cursor.description]
-    profile = dict(zip(columns,row))
-
-    conn.close()
-
-    return {"user_profile":profile}
-
-# ================= SOP UPLOAD =================
 @app.post("/api/sop/upload")
 async def upload_sop(
     doc_name: str = Form(...),
@@ -222,218 +229,251 @@ async def upload_sop(
     version: str = Form(...),
     file: UploadFile = File(...)
 ):
-
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    # Save file
-    file_path = os.path.join(SOP_DIR, file.filename)
-
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    # Extract text from SOP
-    text = extract_text(file_path, file.filename)
-
-    # Save SOP metadata
-    cursor.execute("""
-        INSERT INTO sop_registry
-        (doc_name, job_role_code, job_role_text, file_path, version)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        doc_name,
-        job_role_code,
-        job_role_text,
-        file_path,
-        version
-    ))
-
-    conn.commit()
-    conn.close()
-
-    # Rebuild embeddings automatically
     try:
-        subprocess.run(
-            ["python", "generate_embeddings.py"],
-            cwd=BASE_DIR
-        )
-        print("Embeddings rebuilt")
+        # Validate file extension
+        file_ext = file.filename.split('.')[-1].lower()
+        if file_ext not in ALLOWED_EXTENSIONS:
+            return {"error": f"File type .{file_ext} not allowed"}
+
+        # Save file
+        file_path = os.path.join(STORAGE_DIR, "sops", file.filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Extract text
+        text = extract_text(file_path, file.filename)
+
+        # Store metadata in MongoDB
+        sop_record = {
+            "doc_name": doc_name,
+            "job_role_code": job_role_code,
+            "job_role_text": job_role_text,
+            "file_path": file_path,
+            "file_name": file.filename,
+            "file_size": os.path.getsize(file_path),
+            "file_type": file_ext,
+            "version": version,
+            "doc_type": "ROLE",
+            "skill_level": "S2",
+            "extracted_text_preview": text[:500] if text else "",
+            "full_text_length": len(text) if text else 0,
+            "upload_date": datetime.utcnow(),
+            "content_hash": hash(text) if text else None
+        }
+
+        db["sop_registry"].insert_one(sop_record)
+
+        # Trigger embedding generation
+        try:
+            subprocess.run(
+                ["python", "generate_embeddings.py"],
+                cwd=BASE_DIR,
+                timeout=30
+            )
+            print("✓ Embeddings generated")
+        except Exception as e:
+            print(f"⚠ Embedding generation warning: {e}")
+
+        return {"message": "SOP uploaded successfully", "text_extracted": len(text) > 0}
 
     except Exception as e:
-        print("Embedding rebuild failed:", e)
+        return {"error": str(e)}
 
-    return {"message": "SOP uploaded successfully"}
-
-# 🔥 THIS FORMAT MATCHES chat_ui.py EXACTLY
 @app.get("/api/sops")
 def list_sops(query: str = ""):
+    try:
+        sops = list(db["sop_registry"].find({}, {"_id": 0}))
+        
+        if not sops:
+            return {"columns": [], "rows": [], "best_match": None}
 
-    conn = get_conn()
-    cursor = conn.cursor()
+        # Extract columns from first record
+        columns = list(sops[0].keys())
+        
+        # Score documents based on query
+        for sop in sops:
+            if query:
+                query_lower = query.lower()
+                doc_name = sop.get("doc_name", "").lower()
+                sop["match_score"] = 100 if query_lower in doc_name else (50 if query_lower in sop.get("file_name", "").lower() else 0)
+            else:
+                sop["match_score"] = 0
 
-    # Fetch SOPs with metadata
-    cursor.execute("""
-        SELECT
-            s.doc_name,
-            s.job_role_code,
-            s.job_role_text,
-            s.version,
-            s.doc_type,
-            s.skill_level,
-            m.criticality,
-            m.proficiency_level,
-            m.last_updated
-        FROM sop_registry s
-        LEFT JOIN sop_metadata m
-        ON s.id = m.sop_id
-    """)
+        # Sort by match score
+        sops.sort(key=lambda x: -x["match_score"])
+        
+        rows = [[sop.get(col) for col in columns] for sop in sops]
+        best_match = rows[0] if rows else None
 
-    rows = cursor.fetchall()
+        return {
+            "columns": columns,
+            "rows": rows,
+            "best_match": best_match
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
-    # Convert rows to dictionary objects
-    sops = []
-    for r in rows:
-        sops.append({
-            "doc_name": r[0],
-            "job_role_code": r[1],
-            "job_role_text": r[2],
-            "version": r[3],
-            "doc_type": r[4],
-            "skill_level": r[5],
-            "criticality": r[6],
-            "proficiency_level": r[7],
-            "last_updated": r[8]
-        })
-
-    # -----------------------------
-    # STEP 1: Query Matching Score
-    # -----------------------------
-
-    query = query.lower()
-
-    for sop in sops:
-        name = sop["doc_name"].lower()
-
-        if query and query in name:
-            sop["match_score"] = 1
-        else:
-            sop["match_score"] = 0
-
-    # -----------------------------
-    # STEP 2: Metadata Priority
-    # -----------------------------
-
-    priority_map = {
-        "HIGH": 1,
-        "MEDIUM": 2,
-        "LOW": 3
-    }
-
-    for sop in sops:
-        sop["priority"] = priority_map.get(sop["criticality"], 4)
-
-    # -----------------------------
-    # STEP 3: Final Ranking
-    # -----------------------------
-
-    sops.sort(key=lambda x: (
-        -x["match_score"],   # query match first
-        x["priority"]        # then metadata ranking
-    ))
-
-    conn.close()
-
-    # -----------------------------
-    # Prepare response
-    # -----------------------------
-
-    columns = [
-        "doc_name",
-        "job_role_code",
-        "job_role_text",
-        "version",
-        "doc_type",
-        "skill_level",
-        "criticality",
-        "proficiency_level",
-        "last_updated"
-    ]
-
-    rows = [
-        [
-            sop["doc_name"],
-            sop["job_role_code"],
-            sop["job_role_text"],
-            sop["version"],
-            sop["doc_type"],
-            sop["skill_level"],
-            sop["criticality"],
-            sop["proficiency_level"],
-            sop["last_updated"]
-        ]
-        for sop in sops
-    ]
-
-    return {
-        "columns": columns,
-        "rows": rows,
-        "best_match": rows[0] if rows else None
-    }
 @app.get("/api/sop/open/{name}")
 def open_sop(name: str):
+    try:
+        sop = db["sop_registry"].find_one({"doc_name": name}, {"_id": 0})
+        if not sop:
+            return {"error": "SOP not found"}
+        return FileResponse(sop["file_path"])
+    except Exception as e:
+        return {"error": str(e)}
 
-    conn = get_conn()
-    cursor = conn.cursor()
+# ================= USER FILE UPLOADS (NEW) =================
 
-    cursor.execute("SELECT file_path FROM sop_registry WHERE doc_name=?",(name,))
-    row = cursor.fetchone()
+@app.post("/api/user/upload-file")
+async def upload_user_file(
+    uid: str = Form(...),
+    file_type: str = Form(...),  # "document" or "snapshot"
+    file_description: str = Form(""),
+    file: UploadFile = File(...)
+):
+    """
+    Allow users to upload various file types:
+    - Images (PNG, JPG, GIF, BMP, WebP)
+    - Excel files (XLSX, XLS)
+    - PDF documents
+    - Word documents (DOCX, DOC)
+    - CSV, TXT files
+    """
+    try:
+        # Validate user exists
+        user = db["user_profiles"].find_one({"uid": uid})
+        if not user:
+            return {"error": "User not found"}
 
-    conn.close()
+        # Validate file extension
+        file_ext = file.filename.split('.')[-1].lower()
+        if file_ext not in ALLOWED_EXTENSIONS:
+            return {"error": f"File type .{file_ext} not allowed. Allowed: {', '.join(ALLOWED_EXTENSIONS.keys())}"}
 
-    if not row:
-        return {"error":"Not found"}
+        # Determine storage directory
+        if file_type == "snapshot":
+            storage_subdir = "snapshots"
+            collection = "snapshots"
+        else:
+            storage_subdir = "user_uploads"
+            collection = "user_uploads"
 
-    return FileResponse(row[0])
+        # Create unique filename
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        unique_filename = f"{uid}_{timestamp}_{file.filename}"
+        file_path = os.path.join(STORAGE_DIR, storage_subdir, unique_filename)
 
-# ================= ROLE SKILL MAP =================
+        # Save file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
 
-@app.get("/api/role-skill-map")
-def role_skill_map():
+        file_size = os.path.getsize(file_path)
 
-    conn = get_conn()
-    cursor = conn.cursor()
+        # Extract text if applicable
+        extracted_text = ""
+        if file_ext in ['pdf', 'docx', 'doc', 'txt']:
+            extracted_text = extract_text(file_path, file.filename)
 
-    cursor.execute("SELECT * FROM job_role_skills")
+        # Store metadata in MongoDB
+        file_record = {
+            "uid": uid,
+            "file_name": file.filename,
+            "unique_file_name": unique_filename,
+            "file_path": file_path,
+            "file_type": file_ext,
+            "file_size": file_size,
+            "mime_type": ALLOWED_EXTENSIONS.get(file_ext, "unknown"),
+            "file_description": file_description,
+            "extracted_text": extracted_text,
+            "upload_date": datetime.utcnow(),
+            "is_image": file_ext in ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'],
+            "is_document": file_ext in ['pdf', 'docx', 'doc', 'xlsx', 'xls', 'csv', 'txt'],
+            "status": "ready"
+        }
 
-    rows = cursor.fetchall()
-    columns = [c[0] for c in cursor.description]
+        result = db[collection].insert_one(file_record)
 
-    conn.close()
+        return {
+            "message": f"{file_type.capitalize()} uploaded successfully",
+            "file_id": str(result.inserted_id),
+            "file_name": unique_filename,
+            "file_size": file_size,
+            "extracted_text_preview": extracted_text[:200] if extracted_text else ""
+        }
 
-    return {"columns":columns,"rows":rows}
+    except Exception as e:
+        return {"error": str(e)}
 
-@app.get("/api/role-skill-map/{role_code}")
-def role_skill_by_role(role_code:str):
+@app.get("/api/user/files/{uid}")
+def list_user_files(uid: str, file_type: str = "all"):
+    """
+    Get all uploaded files for a user
+    file_type: "all", "documents", "snapshots", or specific extension
+    """
+    try:
+        if file_type == "snapshots":
+            files = list(db["snapshots"].find({"uid": uid}, {"_id": 0, "file_path": 0}))
+        elif file_type == "documents":
+            files = list(db["user_uploads"].find({"uid": uid}, {"_id": 0, "file_path": 0}))
+        else:
+            # Combine both collections
+            snapshots = list(db["snapshots"].find({"uid": uid}, {"_id": 0, "file_path": 0, "upload_date": 1}))
+            uploads = list(db["user_uploads"].find({"uid": uid}, {"_id": 0, "file_path": 0, "upload_date": 1}))
+            files = snapshots + uploads
+            files.sort(key=lambda x: x.get("upload_date", datetime.utcnow()), reverse=True)
 
-    conn = get_conn()
-    cursor = conn.cursor()
+        if files:
+            columns = ["file_name", "file_type", "file_size", "upload_date", "file_description"]
+            rows = [[f.get(col) for col in columns] for f in files]
+            return {"columns": columns, "rows": rows, "total_files": len(files)}
+        
+        return {"columns": [], "rows": [], "total_files": 0}
 
-    cursor.execute("""
-        SELECT skill_level,proficiency,criticality
-        FROM job_role_skills
-        WHERE job_role_code=?
-    """,(role_code,))
+    except Exception as e:
+        return {"error": str(e)}
 
-    rows = cursor.fetchall()
+@app.get("/api/user/download/{uid}/{file_name}")
+def download_user_file(uid: str, file_name: str):
+    """Download a user-uploaded file"""
+    try:
+        # Find file in both collections
+        file_doc = db["snapshots"].find_one({"uid": uid, "unique_file_name": file_name})
+        if not file_doc:
+            file_doc = db["user_uploads"].find_one({"uid": uid, "unique_file_name": file_name})
+        
+        if not file_doc:
+            return {"error": "File not found"}
 
-    conn.close()
+        return FileResponse(file_doc["file_path"], filename=file_doc["file_name"])
 
-    skills=[{"skill_level":r[0],"proficiency":r[1], "criticality":r[2]} for r in rows]
+    except Exception as e:
+        return {"error": str(e)}
 
-    return {"skills":skills}
+@app.delete("/api/user/delete-file/{uid}/{file_name}")
+def delete_user_file(uid: str, file_name: str):
+    """Delete a user-uploaded file"""
+    try:
+        # Find and delete from snapshots
+        file_doc = db["snapshots"].find_one_and_delete({"uid": uid, "unique_file_name": file_name})
+        if file_doc:
+            if os.path.exists(file_doc["file_path"]):
+                os.remove(file_doc["file_path"])
+            return {"message": "Snapshot deleted successfully"}
 
+        # Find and delete from user_uploads
+        file_doc = db["user_uploads"].find_one_and_delete({"uid": uid, "unique_file_name": file_name})
+        if file_doc:
+            if os.path.exists(file_doc["file_path"]):
+                os.remove(file_doc["file_path"])
+            return {"message": "File deleted successfully"}
 
-# ================= SKILLS REGISTRY =================
+        return {"error": "File not found"}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+# ================= SKILLS MANAGEMENT =================
 
 @app.post("/api/skill/add")
 async def add_skill(
@@ -442,80 +482,74 @@ async def add_skill(
     proficiency: str = Form(""),
     criticality: str = Form("")
 ):
-
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        INSERT OR REPLACE INTO skills_registry
-        VALUES (?,?,?,?)
-    """,(skill_id,skill_name,proficiency,criticality))
-
-    conn.commit()
-    conn.close()
-
-    return {"message":"Skill added successfully"}
-
+    try:
+        skill_data = {
+            "skill_id": skill_id,
+            "skill_name": skill_name,
+            "proficiency": proficiency,
+            "criticality": criticality,
+            "created_at": datetime.utcnow()
+        }
+        db["skills_registry"].update_one(
+            {"skill_id": skill_id},
+            {"$set": skill_data},
+            upsert=True
+        )
+        return {"message": "Skill added successfully"}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/api/skills")
 def list_skills():
+    try:
+        skills = list(db["skills_registry"].find({}, {"_id": 0}))
+        if skills:
+            columns = list(skills[0].keys())
+            rows = [[skill.get(col) for col in columns] for skill in skills]
+            return {"columns": columns, "rows": rows}
+        return {"columns": [], "rows": []}
+    except Exception as e:
+        return {"error": str(e)}
 
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM skills_registry")
-
-    rows = cursor.fetchall()
-    columns = [c[0] for c in cursor.description]
-
-    conn.close()
-
-    return {"columns":columns,"rows":rows}
-
-# ================= USER SKILL MAP =================
+# ================= USER SKILL MAPPING =================
 
 @app.post("/api/user-skill/add")
 async def add_user_skill(
     uid: str = Form(...),
     skill_id: str = Form(...)
 ):
-
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        INSERT INTO user_skills_map(uid,skill_id)
-        VALUES (?,?)
-    """,(uid,skill_id))
-
-    conn.commit()
-    conn.close()
-
-    return {"message":"User skill added"}
-
+    try:
+        skill_record = {
+            "uid": uid,
+            "skill_id": skill_id,
+            "assigned_date": datetime.utcnow()
+        }
+        db["user_skills_map"].insert_one(skill_record)
+        return {"message": "User skill added"}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/api/user-skills/{uid}")
-def get_user_skills(uid:str):
+def get_user_skills(uid: str):
+    try:
+        user_skills = list(db["user_skills_map"].find({"uid": uid}, {"_id": 0}))
+        skill_ids = [us["skill_id"] for us in user_skills]
+        
+        skills = list(db["skills_registry"].find(
+            {"skill_id": {"$in": skill_ids}},
+            {"_id": 0}
+        ))
+        
+        if skills:
+            columns = list(skills[0].keys())
+            rows = [[skill.get(col) for col in columns] for skill in skills]
+            return {"columns": columns, "rows": rows}
+        
+        return {"columns": [], "rows": []}
+    except Exception as e:
+        return {"error": str(e)}
 
-    conn = get_conn()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT s.skill_id,s.skill_name,s.proficiency,s.criticality
-        FROM skills_registry s
-        JOIN user_skills_map u
-        ON s.skill_id = u.skill_id
-        WHERE u.uid=?
-    """,(uid,))
-
-    rows = cursor.fetchall()
-    columns = [c[0] for c in cursor.description]
-
-    conn.close()
-
-    return {"columns":columns,"rows":rows}
-
-# ================= SAVE ROLE SKILL MAP =================
+# ================= ROLE-SKILL MAPPING =================
 
 @app.post("/api/role-skill-map/save")
 async def save_role_skill_map(
@@ -524,24 +558,69 @@ async def save_role_skill_map(
     proficiency: str = Form(...),
     criticality: str = Form(...)
 ):
+    try:
+        # Remove old mapping
+        db["job_role_skills"].delete_many({"job_role_code": job_role_code})
+        
+        # Add new mapping
+        mapping = {
+            "job_role_code": job_role_code,
+            "skill_level": skill_level,
+            "proficiency": proficiency,
+            "criticality": criticality,
+            "updated_at": datetime.utcnow()
+        }
+        db["job_role_skills"].insert_one(mapping)
+        
+        return {"message": "Role Skill Map saved successfully"}
+    except Exception as e:
+        return {"error": str(e)}
 
-    conn = get_conn()
-    cursor = conn.cursor()
+@app.get("/api/role-skill-map")
+def list_role_skill_map():
+    try:
+        mappings = list(db["job_role_skills"].find({}, {"_id": 0}))
+        if mappings:
+            columns = list(mappings[0].keys())
+            rows = [[m.get(col) for col in columns] for m in mappings]
+            return {"columns": columns, "rows": rows}
+        return {"columns": [], "rows": []}
+    except Exception as e:
+        return {"error": str(e)}
 
-    # Remove old mapping (update behavior)
-    cursor.execute(
-        "DELETE FROM job_role_skills WHERE job_role_code=?",
-        (job_role_code,)
-    )
+@app.get("/api/role-skill-map/{role_code}")
+def get_role_skills(role_code: str):
+    try:
+        mapping = db["job_role_skills"].find_one(
+            {"job_role_code": role_code},
+            {"_id": 0}
+        )
+        if not mapping:
+            return {"skills": []}
+        
+        return {"skills": [mapping]}
+    except Exception as e:
+        return {"error": str(e)}
 
-    cursor.execute("""
-        INSERT INTO job_role_skills(job_role_code,skill_level,proficiency,criticality)
-        VALUES (?,?,?,?)
-    """,(job_role_code,skill_level,proficiency,criticality))
+# ================= STATS & DASHBOARD =================
 
-    
-
-    conn.commit()
-    conn.close()
-
-    return {"message":"Role Skill Map saved successfully"}
+@app.get("/api/stats")
+def get_stats():
+    """Get overall system statistics"""
+    try:
+        stats = {
+            "total_users": db["user_profiles"].count_documents({}),
+            "total_sops": db["sop_registry"].count_documents({}),
+            "total_skills": db["skills_registry"].count_documents({}),
+            "total_user_uploads": db["user_uploads"].count_documents({}),
+            "total_snapshots": db["snapshots"].count_documents({}),
+            "total_files": db["user_uploads"].count_documents({}) + db["snapshots"].count_documents({}),
+            "total_storage_gb": sum([
+                os.path.getsize(os.path.join(STORAGE_DIR, subdir, f))
+                for subdir in ["sops", "user_uploads", "snapshots"]
+                for f in os.listdir(os.path.join(STORAGE_DIR, subdir)) if os.path.isfile(os.path.join(STORAGE_DIR, subdir, f))
+            ]) / (1024**3)
+        }
+        return stats
+    except Exception as e:
+        return {"error": str(e)}
