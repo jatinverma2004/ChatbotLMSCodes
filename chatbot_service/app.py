@@ -7,6 +7,8 @@ import json
 import threading
 import sqlite3
 import re
+import os
+import base64
 import random
 from datetime import datetime
 
@@ -15,6 +17,7 @@ from evaluation_db import insert_record, init_db
 
 # ✅ GROQ IMPORT
 from groq import Groq
+
 
 # ================= DATABASE SETUP =================
 
@@ -56,17 +59,125 @@ app.add_middleware(
 
 MCP_BASE_URL = "http://127.0.0.1:8100"
 
-# ❌ OLD (kept but unused for safety)
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+OLLAMA_URL   = "http://127.0.0.1:11434/api/generate"
 OLLAMA_MODEL = "phi3:latest"
 
 # ✅ GROQ CLIENT
-GROQ_API_KEY = "YOUR_API_KEY_HERE"
+GROQ_API_KEY = "Your api key here"
 client = Groq(api_key=GROQ_API_KEY)
 print("✅ GROQ CLIENT INITIALIZED")
 
-SOP_CACHE = {}        # full text cache  {doc_name: full_text}
-SNIPPET_CACHE = {}    # snippet cache    {doc_name: first_300_chars}
+SOP_CACHE     = {}   # full text cache  {doc_name: full_text}
+SNIPPET_CACHE = {}   # snippet cache    {doc_name: first_300_chars}
+
+# ================= FILE UPLOAD DIRECTORIES =================
+# Folders where mcp_v3_server saves uploaded user files
+UPLOAD_DIRS = [
+    os.path.join(os.path.dirname(__file__), "..", "mcp_v3_server", "file_storage", "snapshots"),
+    os.path.join(os.path.dirname(__file__), "..", "mcp_v3_server", "file_storage", "user_uploads"),
+    os.path.join(os.path.dirname(__file__), "..", "mcp_v3_server", "sop_storage"),
+]
+
+IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'}
+
+# ================= FILE HELPERS =================
+
+def find_uploaded_file(filename: str) -> str | None:
+    """Search upload dirs for the file. Handles both exact name and unique names like uid_timestamp_original.png"""
+    for directory in UPLOAD_DIRS:
+        if not os.path.isdir(directory):
+            continue
+        for root, _, files in os.walk(directory):
+            for f in files:
+                if f == filename or f.endswith("_" + filename):
+                    return os.path.join(root, f)
+    return None
+
+
+def file_to_base64(path: str) -> tuple[str, str]:
+    """Return (base64_string, media_type) for an image file."""
+    ext = os.path.splitext(path)[1].lower()
+    media_map = {
+        '.png':  'image/png',
+        '.jpg':  'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif':  'image/gif',
+        '.bmp':  'image/bmp',
+        '.webp': 'image/webp',
+    }
+    media_type = media_map.get(ext, 'image/png')
+    with open(path, 'rb') as f:
+        return base64.b64encode(f.read()).decode('utf-8'), media_type
+
+
+def extract_doc_text_from_path(path: str, filename: str) -> str:
+    """Extract text from PDF / DOCX / XLSX / CSV / TXT on disk."""
+    ext = os.path.splitext(filename)[1].lower()
+    try:
+        if ext == '.pdf':
+            try:
+                reader = PdfReader(path)
+                text = "\n".join(p.extract_text() or "" for p in reader.pages[:10]).strip()
+                return text if text else "[PDF appears to be image-based — no selectable text]"
+            except Exception as e:
+                return f"[Could not read PDF: {e}]"
+
+        elif ext in ('.docx', '.doc'):
+            doc = Document(path)
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
+        elif ext in ('.xlsx', '.xls'):
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(path)
+                lines = []
+                for ws in wb.worksheets:
+                    lines.append(f"[Sheet: {ws.title}]")
+                    for row in ws.iter_rows(max_row=30, values_only=True):
+                        r = " | ".join(str(c) for c in row if c is not None)
+                        if r.strip():
+                            lines.append(r)
+                return "\n".join(lines)
+            except Exception as e:
+                return f"[Could not read Excel: {e}]"
+
+        elif ext == '.csv':
+            import csv
+            lines = []
+            with open(path, encoding='utf-8', errors='ignore') as f:
+                for i, row in enumerate(csv.reader(f)):
+                    if i >= 30:
+                        break
+                    lines.append(" | ".join(row))
+            return "\n".join(lines)
+
+        elif ext == '.txt':
+            with open(path, encoding='utf-8', errors='ignore') as f:
+                return f.read()[:4000]
+
+        return f"[Unsupported file type: {ext}]"
+
+    except Exception as e:
+        return f"[Error reading file: {e}]"
+
+
+def parse_uploaded_file_from_message(message: str) -> tuple[str, str]:
+    """
+    If message contains [User uploaded: filename], extract:
+    - filename
+    - cleaned message (tag stripped out)
+    Returns (filename, clean_message). filename is "" if no tag found.
+    """
+    match = re.search(r'\[User uploaded:\s*(.+?)\]', message)
+    if not match:
+        return "", message
+
+    filename    = match.group(1).strip()
+    clean_msg   = re.sub(r'\[User uploaded:.*?\]', '', message)
+    clean_msg   = re.sub(r'File preview:.*', '', clean_msg, flags=re.DOTALL).strip()
+    if not clean_msg:
+        clean_msg = "Please analyse this file and describe what it contains."
+    return filename, clean_msg
 
 # ================= SOP SANITIZER =================
 
@@ -129,7 +240,6 @@ def hive_router(message, context):
 # ================= SOP TEXT LOADER =================
 
 def fetch_sop_text(sop_name: str) -> str:
-    """Fetch and cache full text of a SOP document."""
     if sop_name in SOP_CACHE:
         return SOP_CACHE[sop_name]
     try:
@@ -158,7 +268,6 @@ def fetch_sop_text(sop_name: str) -> str:
 
 
 def fetch_sop_snippet(sop_name: str, chars: int = 300) -> str:
-    """Return a short snippet (first N chars) of a SOP for inventory listing."""
     if sop_name in SNIPPET_CACHE:
         return SNIPPET_CACHE[sop_name]
     full = fetch_sop_text(sop_name)
@@ -169,14 +278,12 @@ def fetch_sop_snippet(sop_name: str, chars: int = 300) -> str:
 # ================= SMART DOC SELECTOR =================
 
 def normalize_doc_name(name: str) -> set:
-    """'Important_Doc__2_.docx' → {'important', 'doc', '2'}"""
     name = name.lower()
     name = re.sub(r'\.(pdf|docx|doc|txt)$', '', name)
     name = re.sub(r'[_\-\.]+', ' ', name)
     name = re.sub(r'[^a-z0-9\s]', '', name)
     return set(w for w in name.split() if w)
 
-# ⚠️ "important" is intentionally NOT a stop word so it matches Important_Doc
 _STOP_WORDS = {
     'what', 'does', 'the', 'say', 'is', 'in', 'a', 'an', 'are', 'how',
     'do', 'i', 'to', 'for', 'of', 'and', 'or', 'tell', 'me', 'about',
@@ -192,11 +299,7 @@ def normalize_query(query: str) -> set:
 
 
 def score_doc(doc_name: str, query_words: set) -> int:
-    """
-    Score doc relevance to query.
-    +100 exact token match, +50 substring match.
-    """
-    doc_words = normalize_doc_name(doc_name)
+    doc_words   = normalize_doc_name(doc_name)
     doc_name_flat = doc_name.lower()
     score = 0
     for qw in query_words:
@@ -208,11 +311,6 @@ def score_doc(doc_name: str, query_words: set) -> int:
 
 
 def select_relevant_docs(docs, user_message, top_n=3):
-    """
-    Pick top_n most relevant docs by name-match scoring.
-    If NO doc scores above 0 (generic query), return ALL docs
-    so the inventory prompt covers everything.
-    """
     query_words = normalize_query(user_message)
     print(f"🔍 Query words: {query_words}")
 
@@ -223,16 +321,12 @@ def select_relevant_docs(docs, user_message, top_n=3):
         scored.append((s, d))
 
     scored.sort(key=lambda x: -x[0])
-
     top_score = scored[0][0] if scored else 0
 
     if top_score > 0:
-        # Specific doc query → return top matches
         selected = [d for _, d in scored[:top_n]]
     else:
-        # Generic query (no name match) → return ALL docs
-        # so inventory + snippet approach covers everything
-        selected = [d for _, d in scored]  # all docs
+        selected = [d for _, d in scored]
 
     print(f"✅ Selected: {[d.get('doc_name') for d in selected]}")
     return selected
@@ -240,12 +334,6 @@ def select_relevant_docs(docs, user_message, top_n=3):
 # ================= DOC INVENTORY BUILDER =================
 
 def build_doc_inventory(docs) -> str:
-    """
-    Build a compact inventory string listing every assigned SOP
-    with its name and a short content snippet.
-    This is always injected into the prompt so the LLM knows
-    what documents exist — even if we don't load their full text.
-    """
     lines = ["ASSIGNED SOP DOCUMENTS FOR THIS EMPLOYEE:\n"]
     for i, d in enumerate(docs, 1):
         name = d.get("doc_name", "Unknown")
@@ -303,9 +391,10 @@ QUESTION:
 ANSWER:
 """
 
-# ================= LLM CALL =================
+# ================= LLM CALL (text only) =================
 
-def call_ollama(prompt):
+def call_groq_text(prompt: str) -> str:
+    """Standard text-only Groq call — same as before."""
     try:
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
@@ -315,19 +404,60 @@ def call_ollama(prompt):
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        print("GROQ ERROR:", e)
+        print("GROQ TEXT ERROR:", e)
         return f"🔥 ERROR: {str(e)}"
 
-# ================= EVALUATION (FIXED) =================
+# Keep old name as alias so nothing else breaks
+call_ollama = call_groq_text
+
+# ================= LLM CALL (vision — image + text) =================
+
+def call_groq_vision(image_b64: str, media_type: str, user_question: str, system_context: str = "") -> str:
+    """
+    Send an image + question to a vision-capable Groq model.
+    Uses meta-llama/llama-4-scout-17b-16e-instruct which supports image_url content blocks.
+    """
+    try:
+        messages = []
+
+        if system_context:
+            messages.append({"role": "system", "content": system_context})
+
+        messages.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{media_type};base64,{image_b64}"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": user_question if user_question else "What does this image show? Describe it in detail."
+                }
+            ]
+        })
+
+        response = client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=2000
+        )
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        print("GROQ VISION ERROR:", e)
+        return f"🔥 Vision ERROR: {str(e)}"
+
+# ================= EVALUATION =================
 
 def run_evaluation(uid, message, sop_text, answer):
-
     ev = evaluate_answer(message, sop_text, answer)
-
     if ev is None:
         print("❌ Evaluation failed, skipping")
         return
-
     try:
         insert_record({
             "uid": uid,
@@ -390,7 +520,7 @@ def generate_prompt_suggestions(role, docs, user_query=None, uid=None):
     all_suggestions = base + sop_based + query_based
     random.shuffle(all_suggestions)
 
-    seen = set()
+    seen   = set()
     unique = []
     for s in all_suggestions:
         if s not in seen:
@@ -398,7 +528,7 @@ def generate_prompt_suggestions(role, docs, user_query=None, uid=None):
             seen.add(s)
 
     if uid:
-        last = LAST_SUGGESTIONS.get(uid, [])
+        last   = LAST_SUGGESTIONS.get(uid, [])
         unique = [u for u in unique if u not in last]
 
     final = unique[:5]
@@ -407,59 +537,98 @@ def generate_prompt_suggestions(role, docs, user_query=None, uid=None):
 
     return final
 
-# ================= MAIN ROUTE =================
+# ================= MAIN CHAT ROUTE =================
 
 @app.post("/chat")
 def chat(uid: str = Query(...), message: str = Query(...)):
 
     context = fetch_user_context(uid)
 
-    route = hive_router(message, context)
-    mode = route["mode"]
-    docs = route["docs"]
+    # ── Check for uploaded file tag ────────────────────────────────────────────
+    filename, clean_message = parse_uploaded_file_from_message(message)
 
-    # ── LAYER 1: Doc Inventory (always built from ALL assigned docs) ──────────
-    # Every prompt gets a compact list of ALL doc names + snippets.
-    # This ensures the LLM always knows what documents exist for this employee.
+    # ── IMAGE → handle with vision model, skip normal SOP flow ────────────────
+    if filename:
+        ext = os.path.splitext(filename)[1].lower()
+
+        if ext in IMAGE_EXTS:
+            file_path = find_uploaded_file(filename)
+
+            if file_path:
+                print(f"🖼️  Vision request: {filename}")
+                img_b64, media_type = file_to_base64(file_path)
+
+                # Build a light system context so it knows the user's role
+                user  = context.get("user_profile", {})
+                role  = user.get("job_role_text", "Employee")
+                sys_ctx = f"You are an intelligent assistant for a Jio employee. Their role is: {role}. Analyse the image and answer their question helpfully."
+
+                answer = call_groq_vision(img_b64, media_type, clean_message, sys_ctx)
+                answer = guard_llm_output(answer)
+
+                # Suggestions still useful after image answer
+                route = hive_router(message, context)
+                docs  = route.get("docs", [])
+                suggestions = generate_prompt_suggestions(role, docs, clean_message, uid)
+                suggestion_text = "\n\n💡 You can also ask:\n" + "".join(f"- {s}\n" for s in suggestions)
+
+                threading.Thread(target=run_evaluation, args=(uid, clean_message, "", answer)).start()
+                return {"answer": "🖼️ Image received\n\n" + answer + suggestion_text}
+
+            else:
+                print(f"⚠️  Image not found on disk: {filename}")
+                answer = f"I received your image ({filename}) but couldn't locate it on the server. Please try uploading again."
+                return {"answer": answer}
+
+        # ── DOCUMENT FILE → extract text, inject into prompt ──────────────────
+        else:
+            file_path = find_uploaded_file(filename)
+            if file_path:
+                print(f"📄 Document upload: {filename}")
+                doc_text = extract_doc_text_from_path(file_path, filename)
+                # Prepend extracted text to the message so the normal SOP flow can use it
+                message = f"{clean_message}\n\n--- UPLOADED FILE: {filename} ---\n{doc_text[:3000]}\n--- END OF FILE ---"
+            else:
+                print(f"⚠️  Document not found on disk: {filename}")
+                message = clean_message
+
+    # ── Normal SOP / General flow (unchanged from original) ───────────────────
+    route = hive_router(message, context)
+    mode  = route["mode"]
+    docs  = route["docs"]
+
     doc_inventory = ""
     if mode == "SOP" and docs:
         doc_inventory = build_doc_inventory(docs)
 
-    # ── LAYER 2: Full content for most relevant docs ──────────────────────────
-    # Smart selector picks docs whose NAMES match the query keywords.
-    # For generic queries (no name match) it returns ALL docs so snippets cover them.
     selected_docs = select_relevant_docs(docs, message, top_n=3)
 
     collected = []
     for d in selected_docs:
-        raw = fetch_sop_text(d["doc_name"])
+        raw   = fetch_sop_text(d["doc_name"])
         clean = clean_sop_text(raw)
         if clean:
             collected.append(f"=== {d['doc_name']} ===\n{clean}")
     sop_text = "\n\n".join(collected)
 
-    # Increased from 3500 → 8000 chars to avoid truncation
     MAX_CHARS = 8000
     if len(sop_text) > MAX_CHARS:
         sop_text = sop_text[:MAX_CHARS]
 
     prompt = build_prompt(context, sop_text, doc_inventory, message, mode)
 
-    answer = call_ollama(prompt)
+    answer = call_groq_text(prompt)
     answer = guard_llm_output(answer)
 
-    # Initialize before if-block to avoid UnboundLocalError
     suggestions = []
-    header = ""
-    final = answer
+    header      = ""
+    final       = answer
 
     if mode == "SOP" and docs:
         header = f"📄 Using {len(docs)} SOP document(s)\n\n"
-        role = context.get("user_profile", {}).get("job_role_text", "Employee")
-        suggestions = generate_prompt_suggestions(role, docs, message, uid)
-        suggestion_text = "\n\n💡 You can also ask:\n"
-        for s in suggestions:
-            suggestion_text += f"- {s}\n"
+        role   = context.get("user_profile", {}).get("job_role_text", "Employee")
+        suggestions     = generate_prompt_suggestions(role, docs, message, uid)
+        suggestion_text = "\n\n💡 You can also ask:\n" + "".join(f"- {s}\n" for s in suggestions)
         final = header + answer + suggestion_text
 
     print("FINAL:", final[:300])
@@ -479,19 +648,13 @@ def chat(uid: str = Query(...), message: str = Query(...)):
 @app.get("/dashboard/data")
 def dashboard_data():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn   = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM evaluations ORDER BY created_at DESC")
-        rows = cursor.fetchall()
+        rows    = cursor.fetchall()
         columns = [c[0] for c in cursor.description]
         conn.close()
-
-        result = []
-        for row in rows:
-            result.append(dict(zip(columns, row)))
-
-        return result
-
+        return [dict(zip(columns, row)) for row in rows]
     except Exception as e:
         print("Dashboard error:", e)
         return []
