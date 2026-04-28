@@ -20,6 +20,10 @@ pip install pdfplumber --break-system-packages
 2. enter below commands along with the old commands of backend servers
 pip install groq
 npm install -g serve
+
+cd jio-assistant-react
+npm run build
+npx serve -s build
 npx serve -s build
 uvicorn app:app --host 127.0.0.1 --port 9000 --reload
 
